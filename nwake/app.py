@@ -47,7 +47,7 @@ class Tray(QObject):
         else:
             online = sum(monitor.readout(host)[0] == "online" for host in monitor.hosts)
             summary = f"{online} / {len(monitor.hosts)} 台在线"
-        self.icon.setToolTip(f"Nwake · {summary}\n点击打开电脑列表")
+        self.icon.setToolTip(f"Nwake · {summary}")
 
     @Slot(QSystemTrayIcon.ActivationReason)
     def _activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:

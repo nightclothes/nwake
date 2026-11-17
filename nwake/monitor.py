@@ -78,14 +78,12 @@ class Monitor(QObject):
     def readout(self, host: Host) -> tuple[str, str]:
         probe = self._probes.get(host)
         if probe and probe.state is Reachability.ONLINE:
-            return "online", "在线"
+            return "online", ""
         if probe and probe.state is Reachability.ERROR:
             return "error", probe.detail
         if self._waiting.get(host, 0) > monotonic():
-            return "waiting", "唤醒包已发送，正在等待电脑回应。"
-        if probe:
-            return "quiet", "未收到 Ping 回复；电脑可能已关机、休眠或禁止 Ping。"
-        return "checking", "正在等待首次检测。"
+            return "waiting", ""
+        return ("quiet" if probe else "checking"), ""
 
     @Slot()
     def refresh(self) -> None:

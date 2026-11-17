@@ -96,10 +96,6 @@ class HostDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 16)
         layout.setSpacing(12)
-        intro = label("填写要唤醒的电脑。MAC 用于唤醒，IPv4 用于检测状态。", muted=True)
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
-
         form = QFormLayout()
         form.setVerticalSpacing(10)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)

@@ -9,7 +9,7 @@ Nwake 是一个常驻 Windows 通知区域的 Wake-on-LAN 工具。点击任务�
 3. 勾选目标，点击「唤醒所选」。软件会继续检测状态；收到目标地址的 Ping 回复后才显示「在线」。
 4. 找不到图标时，点击任务栏通知区域的 `^` 查看隐藏图标。Windows 决定图标是否显示在任务栏上，可以在任务栏设置中调整。
 
-「无响应」表示没有收到 Ping 回复，电脑可能关机、休眠、断网，或阻止了 Ping。唤醒依赖目标的固件、网卡和当前电源状态，首次建议用同一局域网内、已启用 Wake-on-LAN 的有线网卡，从睡眠状态测试。关机后能否唤醒因机型而异，见 [Microsoft 的 WOL 说明](https://learn.microsoft.com/zh-cn/windows/win32/power/system-power-states#wake-on-lan-behavior)。
+首次唤醒可让同一局域网内已启用 Wake-on-LAN 的电脑进入睡眠后测试。关机后能否唤醒因机型而异。[Microsoft 的 WOL 说明](https://learn.microsoft.com/zh-cn/windows/win32/power/system-power-states#wake-on-lan-behavior)
 
 首次保存电脑时，Nwake 会在 `Nwake.exe` 的同级目录创建 `hosts.json`。替换 EXE 时保留这份文件即可保留电脑列表，换目录时一起移动两个文件。旧版配置的位置和迁移方法见[技术文档](docs/technical.md#本地数据)。
 

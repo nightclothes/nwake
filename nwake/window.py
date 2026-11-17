@@ -65,16 +65,10 @@ class DeviceWindow(QMainWindow):
         logo = label()
         logo.setPixmap(icon.pixmap(42, 42))
         head.addWidget(logo)
-        title_stack = QVBoxLayout()
-        title_stack.setSpacing(0)
         title = label("Nwake")
         title.setProperty("header", True)
         title.setFont(QFont("Segoe UI", 18, QFont.Weight.DemiBold))
-        title_stack.addWidget(title)
-        subtitle = label("局域网开机")
-        subtitle.setObjectName("headerSub")
-        title_stack.addWidget(subtitle)
-        head.addLayout(title_stack)
+        head.addWidget(title)
         head.addStretch()
         summary = QVBoxLayout()
         summary.setSpacing(0)
@@ -83,7 +77,7 @@ class DeviceWindow(QMainWindow):
         self.counter.setFont(QFont("Consolas", 17, QFont.Weight.Bold))
         self.counter.setAlignment(Qt.AlignmentFlag.AlignRight)
         summary.addWidget(self.counter)
-        summary_label = label("电脑在线 / 总数")
+        summary_label = label("在线 / 总数")
         summary_label.setObjectName("headerSub")
         summary_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         summary.addWidget(summary_label)
@@ -108,21 +102,15 @@ class DeviceWindow(QMainWindow):
         empty_layout = QVBoxLayout(self.empty)
         empty_layout.setContentsMargins(14, 16, 14, 16)
         empty_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        for text, muted in (
-            ("电脑列表不可用" if load_error else "还没有电脑", False),
-            (
-                "请在详情中查看文件位置，修复后重新打开。"
-                if load_error
-                else "点击「添加电脑」，填入目标的 IPv4 和网卡 MAC 地址。",
-                True,
-            ),
-        ):
-            caption = label(text, muted=muted)
-            caption.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-            caption.setWordWrap(True)
-            if not muted:
-                caption.setFont(QFont("Microsoft YaHei UI", 12, QFont.Weight.DemiBold))
-            empty_layout.addWidget(caption)
+        caption = label("电脑列表不可用" if load_error else "暂无电脑")
+        caption.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        caption.setFont(QFont("Microsoft YaHei UI", 12, QFont.Weight.DemiBold))
+        empty_layout.addWidget(caption)
+        if load_error:
+            recovery = label("请查看详情，修复后重新打开。", muted=True)
+            recovery.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+            recovery.setWordWrap(True)
+            empty_layout.addWidget(recovery)
         self.pages.addWidget(self.empty)
 
         self.table = QTableWidget(0, 4)
@@ -174,9 +162,9 @@ class DeviceWindow(QMainWindow):
         footer = QHBoxLayout()
         info = QVBoxLayout()
         info.setSpacing(1)
-        self.freshness = label("自动检测 · 每 5 秒", muted=True)
+        self.freshness = label(muted=True)
         info.addWidget(self.freshness)
-        self.feedback = label("无响应不代表电脑已关机。")
+        self.feedback = label()
         self.feedback.setObjectName("feedback")
         info.addWidget(self.feedback)
         footer.addLayout(info)
@@ -279,11 +267,11 @@ class DeviceWindow(QMainWindow):
         self.counter.setAccessibleName(f"{online} 台在线，共 {len(self._shown_hosts)} 台电脑")
         last_scan = self.monitor.last_scan
         if self._shown_hosts and self.monitor.scanning:
-            self.freshness.setText("正在检测电脑状态…")
+            self.freshness.setText("检测中…")
         elif self._shown_hosts and last_scan is not None:
-            self.freshness.setText(f"最近检测 {last_scan:%H:%M:%S} · 自动刷新")
+            self.freshness.setText(f"最近检测 {last_scan:%H:%M:%S}")
         else:
-            self.freshness.setText("自动检测 · 每 5 秒")
+            self.freshness.clear()
         self._sync_actions()
 
     @Slot()
