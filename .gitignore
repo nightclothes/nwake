@@ -1,6 +1,9 @@
 /.venv/
 /build/
 /dist/
+/hosts.json
+/nwake.lock
+/.hosts-*.tmp
 __pycache__/
 *.py[cod]
 .ruff_cache/

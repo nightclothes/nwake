@@ -18,6 +18,8 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
+运行源码时，`hosts.json` 与运行期间的 `nwake.lock` 位于仓库根目录。打包后，这两个文件随 EXE 所在目录定位。
+
 ## 生成单文件 EXE
 
 ```powershell

@@ -103,12 +103,6 @@ def main() -> int:
     app.setWindowIcon(icon)
 
     directory = data_directory()
-    try:
-        directory.mkdir(parents=True, exist_ok=True)
-    except OSError as error:
-        message(None, "无法启动 Nwake", "无法创建数据目录。", detail=f"{directory}\n{error}")
-        return 1
-
     lock = QLockFile(str(directory / "nwake.lock"))
     lock.setStaleLockTime(0)
     if not lock.tryLock(0):
@@ -116,7 +110,10 @@ def main() -> int:
             message(None, "Nwake 已在运行", "请从 Windows 通知区域的 Nwake 图标打开电脑列表。")
         else:
             message(
-                None, "无法启动 Nwake", "无法锁定数据目录，请检查写入权限。", detail=str(directory)
+                None,
+                "无法启动 Nwake",
+                "无法锁定配置文件所在目录。请把程序放在可写目录。",
+                detail=str(directory),
             )
         return 1
 

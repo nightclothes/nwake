@@ -1,8 +1,9 @@
-"""Validated host records and per-user JSON storage."""
+"""Validated host records and portable JSON storage."""
 
 import json
 import os
 import re
+import sys
 import tempfile
 from dataclasses import asdict, dataclass
 from ipaddress import IPv4Address, IPv4Network
@@ -84,8 +85,10 @@ def validate_inventory(hosts: tuple[Host, ...]) -> None:
 
 
 def data_directory() -> Path:
-    local = os.environ.get("LOCALAPPDATA")
-    return (Path(local) if local else Path.home() / "AppData" / "Local") / "Nwake"
+    """Keep the inventory beside the executable, or at the source project root."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).resolve().parents[1]
 
 
 class HostStore:
@@ -116,7 +119,12 @@ class HostStore:
         try:
             data = {"version": 1, "hosts": [asdict(host) for host in hosts]}
             with tempfile.NamedTemporaryFile(
-                mode="w", dir=self.path.parent, encoding="utf-8", delete=False
+                mode="w",
+                dir=self.path.parent,
+                prefix=".hosts-",
+                suffix=".tmp",
+                encoding="utf-8",
+                delete=False,
             ) as stream:
                 temporary = Path(stream.name)
                 json.dump(data, stream, ensure_ascii=False, indent=2)

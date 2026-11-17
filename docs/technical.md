@@ -13,7 +13,7 @@
 
 ## 本地数据
 
-文件为 `%LOCALAPPDATA%\Nwake\hosts.json`，编码 UTF-8。其中 `prefix` 为 `null` 时使用默认广播。
+配置文件 `hosts.json` 与 `Nwake.exe` 位于同一目录，采用 UTF-8 编码。首次启动可直接打开空列表，首次保存电脑时创建文件。程序目录需要写入权限。其中 `prefix` 为 `null` 时使用默认广播。
 
 ```json
 {
@@ -29,7 +29,9 @@
 }
 ```
 
-迁移时先退出 Nwake，再复制 `hosts.json`。如果界面显示文件不可用，先备份文件，然后修复 JSON 或把它移到其他目录，重新打开。不要同步 `nwake.lock`；它只用于防止同时运行多个实例。
+从旧版升级时，退出 Nwake，把 `%LOCALAPPDATA%\Nwake\hosts.json` 复制到新版 `Nwake.exe` 同级目录。如果同级目录已有电脑列表，先备份两份配置，再选择要使用的一份。`nwake.lock` 是运行期间的锁文件，迁移配置时只需复制 `hosts.json`。
+
+如果界面显示文件不可用，先备份 `hosts.json`，再修复 JSON 或将原文件改名，最后重新打开软件。
 
 ## 连通与排障
 

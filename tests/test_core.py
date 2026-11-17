@@ -7,11 +7,28 @@ from struct import pack
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from nwake.hosts import Host, HostError, HostStore, StoreError
+from nwake.hosts import Host, HostError, HostStore, StoreError, data_directory
 from nwake.network import Reachability, _interpret_echo, probe_ipv4, send_wake
 
 
 class InventoryTest(unittest.TestCase):
+    def test_packaged_host_inventory_is_saved_beside_the_executable(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable_dir = root / "portable"
+            executable_dir.mkdir()
+            host = Host("工作站", "192.168.1.20", "02:12:34:56:78:9A")
+            with (
+                patch.object(sys, "frozen", True, create=True),
+                patch.object(sys, "executable", str(executable_dir / "Nwake.exe")),
+                patch.object(sys, "_MEIPASS", str(root / "unpacked"), create=True),
+                patch.dict("os.environ", {"LOCALAPPDATA": str(root / "appdata")}),
+            ):
+                store = HostStore(data_directory() / "hosts.json")
+                self.assertEqual(store.load(), ())
+                store.save((host,))
+            self.assertEqual(HostStore(executable_dir / "hosts.json").load(), (host,))
+
     def test_normalization_and_directed_broadcast(self):
         host = Host("  工作站 ", " 192.168.1.20 ", "02-12-34-56-78-9a", 25)
         self.assertEqual(
