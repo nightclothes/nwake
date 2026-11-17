@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDialog,
     QFormLayout,
     QHBoxLayout,
@@ -16,6 +17,12 @@ from PySide6.QtWidgets import (
 )
 
 from nwake.hosts import Host, HostError, StoreError
+
+
+class SelectAll(QCheckBox):
+    def nextCheckState(self) -> None:
+        checked = Qt.CheckState.Checked
+        self.setCheckState(Qt.CheckState.Unchecked if self.checkState() == checked else checked)
 
 
 def label(text: str = "", *, muted: bool = False) -> QLabel:

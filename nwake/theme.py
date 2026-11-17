@@ -106,6 +106,16 @@ QLineEdit {{
 }}
 QLineEdit:focus {{ border-color: {FOCUS}; }}
 QLineEdit[invalid="true"] {{ border-color: {DANGER}; }}
+QComboBox {{
+    background: {SURFACE}; border: 1px solid {LINE}; border-radius: 6px;
+    padding: 4px 7px; min-height: 23px;
+}}
+QComboBox:focus {{ border-color: {FOCUS}; }}
+QProgressBar {{
+    background: {SURFACE}; border: 1px solid {LINE}; border-radius: 5px;
+    text-align: center;
+}}
+QProgressBar::chunk {{ background: {MINT}; border-radius: 4px; }}
 QPlainTextEdit {{ background: {SURFACE}; border: 1px solid {LINE}; padding: 4px; }}
 QPlainTextEdit:focus {{ border-color: {FOCUS}; }}
 QScrollBar:vertical {{ width: 13px; background: {SUBTLE}; margin: 0; }}

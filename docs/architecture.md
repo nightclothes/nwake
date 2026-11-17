@@ -9,7 +9,9 @@ flowchart LR
     UI --> Store[hosts.py · 校验与持久化]
     Store --> Config[(hosts.json)]
     UI --> Monitor[monitor.py · 检测与唤醒调度]
-    Monitor --> Net[network.py · ICMP 与 WOL]
+    UI --> Discovery[discovery_dialog.py / discovery.py · 扫描与批量添加]
+    Monitor --> Net[network.py · ARP / ICMP / WOL]
+    Discovery --> Net
     Net --> LAN[局域网目标]
 ```
 
@@ -19,7 +21,8 @@ flowchart LR
 | `window.py`、`dialogs.py`、`theme.py` | 展示记录与检测信息，处理勾选、表单、确认及反馈。复用窗口与 EXE 图标、颜色与控件样式。 |
 | `hosts.py` | 为 IPv4、MAC 和可选前缀提供统一校验；拒绝重复；存储失败时保留原配置。 |
 | `monitor.py` | 用 8 个并发探测线程和一个独立发送线程执行有界 I/O；工作结果经 Qt 队列交回主线程，UI 无需等待网络超时。 |
-| `network.py` | 编码 Magic Packet、发送广播，以及通过 Windows IP Helper 执行 IPv4 ICMP 探测。 |
+| `discovery.py`、`discovery_dialog.py` | 选择本地网段，在独立任务池扫描设备，按 IP 与 MAC 去重，允许勾选结果后批量保存。切换网段或停止后丢弃之前的探测结果。 |
+| `network.py` | 编码并发送 Magic Packet，通过 Windows IP Helper 执行 IPv4 ICMP 探测和 ARP 查询。 |
 
 列表变化后递增版本号。旧版列表未完成的探测允许结束，但结果会被丢弃；新列表随即开始探测。同一时间最多一轮探测、一个唤醒批次。隐藏窗口不会中断检测。实际退出会取消排队的探测，并停止向批次里尚未开始发送的目标发包。
 

@@ -84,6 +84,7 @@ class Tray(QObject):
     def shutdown(self) -> None:
         self.icon.hide()
         self.window.monitor.stop()
+        self.window.scanner.stop()
 
 
 def main() -> int:

@@ -1,17 +1,23 @@
 import unittest
+from ipaddress import IPv4Interface
+from itertools import count
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
 from time import monotonic
+from unittest.mock import patch
 
 from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QFont
+from PySide6.QtNetwork import QHostInfo
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QPushButton, QSystemTrayIcon
 
 from nwake.app import Tray
 from nwake.dialogs import HostDialog
-from nwake.hosts import Host, HostStore
+from nwake.discovery import LanNetwork
+from nwake.discovery_dialog import DiscoveryDialog
+from nwake.hosts import Host, HostStore, StoreError
 from nwake.monitor import Monitor
 from nwake.network import ProbeResult, Reachability
 from nwake.theme import STYLESHEET, app_icon
@@ -47,6 +53,7 @@ class DeviceWindowTest(unittest.TestCase):
 
     def finish(self):
         self.monitor.stop()
+        self.window.scanner.stop()
         self.window.exiting = True
         self.window.close()
         self.window.deleteLater()
@@ -128,6 +135,100 @@ class DeviceWindowTest(unittest.TestCase):
         )
         self.assertEqual(self.store.load(), ())
         self.assertIs(self.window.pages.currentWidget(), self.window.empty)
+
+    def test_scan_add_selected_hosts_atomically_and_preserve_selection_on_error(self):
+        self.store.save((DESK,))
+        self.launch((DESK,), probe=lambda _: ProbeResult(Reachability.ONLINE))
+        subnet = LanNetwork("测试网段", IPv4Interface("192.0.2.17/29"))
+        found = (
+            Host("lab-pc", "192.0.2.18", "02:12:00:00:00:18", 29),
+            Host("192.0.2.19", "192.0.2.19", "02:12:00:00:00:19", 29),
+            Host("192.0.2.20", "192.0.2.20", "02:12:00:00:00:20", 29),
+        )
+        replies = {host.ip: host.mac for host in found} | {NAS.ip: DESK.mac}
+        requests = []
+
+        def arp(ip, source):
+            requests.append((ip, source))
+            return replies.get(ip)
+
+        ids = count(10_000)
+
+        def lookup(ip, receiver, _slot):
+            lookup_id = next(ids)
+            info = QHostInfo(lookup_id)
+            info.setHostName("lab-pc." if ip == found[0].ip else ip)
+            QTimer.singleShot(0, lambda: receiver._record_name(info))
+            return lookup_id
+
+        self.window.scanner._arp = arp
+        self.window.scanner._lookup = lookup
+
+        def import_results(dialog):
+            self.assertIsInstance(dialog, DiscoveryDialog)
+            self.wait_until(lambda: not self.window.scanner.scanning)
+            grid = dialog.results
+            rows = {grid.item(row, 2).text(): row for row in range(grid.rowCount())}
+            self.assertEqual(set(rows), {host.ip for host in found})
+            self.assertNotIn((DESK.ip, "192.0.2.17"), requests)
+            self.assertTrue(all(source == "192.0.2.17" for _, source in requests))
+            self.wait_until(lambda: grid.item(rows[found[0].ip], 1).text() == "lab-pc")
+            self.assertEqual(self.store.load(), (DESK,))
+
+            first = rows[found[0].ip]
+            grid.setCurrentCell(first, 0)
+            QTest.keyClick(grid, Qt.Key.Key_Space)
+            self.assertTrue(dialog.add_button.isEnabled())
+            grid.item(rows[found[1].ip], 0).setCheckState(Qt.CheckState.Checked)
+            self.assertEqual(dialog.selection.text(), "已勾选 2 台")
+            with patch.object(
+                self.store, "save", side_effect=StoreError("simulated write failure")
+            ):
+                self.click_button(dialog, "添加所选")
+            self.assertEqual(self.store.load(), (DESK,))
+            self.assertEqual(dialog.selection.text(), "已勾选 2 台")
+            self.assertIn("保存失败", dialog.status.text())
+            self.click_button(dialog, "添加所选")
+            self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
+
+        with patch("nwake.discovery_dialog.local_networks", return_value=(subnet,)):
+            self.with_modal(self.window.scan_button, import_results)
+        self.assertEqual(set(self.store.load()), {DESK, *found[:2]})
+        self.assertEqual(self.window.table.rowCount(), 3)
+
+    def test_switching_discovery_network_discards_in_flight_results(self):
+        self.launch()
+        first = LanNetwork("旧网段", IPv4Interface("192.0.2.5/30"))
+        second = LanNetwork("新网段", IPv4Interface("192.0.2.9/30"))
+        started = Event()
+        release = Event()
+
+        def arp(ip, _source):
+            if ip == "192.0.2.6":
+                started.set()
+                release.wait(1.5)
+                return "02:12:00:00:00:06"
+            return "02:12:00:00:00:10"
+
+        self.window.scanner._arp = arp
+        self.window.scanner._lookup = lambda *_: -1
+
+        def switch(dialog):
+            try:
+                self.assertTrue(started.wait(1))
+                dialog.network.setCurrentIndex(1)
+                self.wait_until(lambda: not self.window.scanner.scanning)
+            finally:
+                release.set()
+            self.wait_until(lambda: not self.window.scanner._pool.activeThreadCount())
+            self.app.processEvents()
+            self.assertEqual(dialog.results.rowCount(), 1)
+            self.assertEqual(dialog.results.item(0, 2).text(), "192.0.2.10")
+            QTest.keyClick(dialog, Qt.Key.Key_Escape)
+
+        with patch("nwake.discovery_dialog.local_networks", return_value=(first, second)):
+            self.with_modal(self.window.scan_button, switch)
+        self.assertEqual(self.store.load(), ())
 
     def test_batch_confirmation_partial_failure_and_no_false_online(self):
         sent = []

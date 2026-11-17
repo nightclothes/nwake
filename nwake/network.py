@@ -1,4 +1,4 @@
-"""Wake-on-LAN datagrams and one IPv4 ICMP probe via the Windows IP Helper API."""
+"""Wake-on-LAN datagrams, ICMP probes and ARP via the Windows IP Helper API."""
 
 import ctypes
 import socket
@@ -40,6 +40,38 @@ def send_wake(host: Host) -> None:
         sock.settimeout(0.5)
         if sock.sendto(packet, (host.broadcast, WAKE_PORT)) != len(packet):
             raise OSError("系统未接受完整的唤醒包。")
+
+
+@cache
+def _arp_api():
+    api = ctypes.WinDLL("iphlpapi.dll")
+    uint32 = wintypes.ULONG
+    api.SendARP.argtypes = [uint32, uint32, wintypes.LPVOID, ctypes.POINTER(uint32)]
+    api.SendARP.restype = wintypes.DWORD
+    api.GetBestInterface.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    api.GetBestInterface.restype = wintypes.DWORD
+    return api
+
+
+def preferred_interface_index() -> int | None:
+    """Use the Windows routing table to choose the initial network in the scanner."""
+    index = wintypes.DWORD()
+    return index.value if _arp_api().GetBestInterface(0, ctypes.byref(index)) == 0 else None
+
+
+def resolve_mac(ip: str, source: str) -> str | None:
+    """Look up a directly reachable IPv4 neighbor on the selected local interface."""
+    address = int.from_bytes(socket.inet_aton(ip), byteorder)
+    source_address = int.from_bytes(socket.inet_aton(source), byteorder)
+    # SendARP expects storage aligned as an array of ULONGs, with at least six bytes.
+    buffer = (wintypes.ULONG * 2)()
+    size = wintypes.ULONG(ctypes.sizeof(buffer))
+    status = _arp_api().SendARP(address, source_address, buffer, ctypes.byref(size))
+    if status in (31, 67):  # ERROR_GEN_FAILURE / ERROR_BAD_NET_NAME: no ARP response.
+        return None
+    if status != 0:
+        raise ctypes.WinError(status)
+    return bytes(buffer)[:6].hex(":").upper() if size.value == 6 else None
 
 
 @cache

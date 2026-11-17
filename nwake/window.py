@@ -7,7 +7,6 @@ from PySide6.QtCore import QSignalBlocker, Qt, Signal, Slot
 from PySide6.QtGui import QBrush, QCloseEvent, QColor, QFont, QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView,
-    QCheckBox,
     QFrame,
     QHBoxLayout,
     QHeaderView,
@@ -19,7 +18,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from nwake.dialogs import HostDialog, button, label, message
+from nwake.dialogs import HostDialog, SelectAll, button, label, message
+from nwake.discovery import LanScanner
+from nwake.discovery_dialog import DiscoveryDialog
 from nwake.hosts import MAX_HOSTS, Host, HostStore, StoreError
 from nwake.monitor import Monitor
 from nwake.theme import STATUS
@@ -27,11 +28,6 @@ from nwake.theme import STATUS
 _CHECKED = Qt.CheckState.Checked
 _PARTIAL = Qt.CheckState.PartiallyChecked
 _UNCHECKED = Qt.CheckState.Unchecked
-
-
-class _SelectAll(QCheckBox):
-    def nextCheckState(self) -> None:
-        self.setCheckState(_UNCHECKED if self.checkState() == _CHECKED else _CHECKED)
 
 
 class DeviceWindow(QMainWindow):
@@ -46,6 +42,7 @@ class DeviceWindow(QMainWindow):
         self.store = store
         self.monitor = monitor
         monitor.setParent(self)
+        self.scanner = LanScanner(self)
         self.load_error = load_error
         self.can_hide: Callable[[], bool] = lambda: False
         self.exiting = False
@@ -92,6 +89,9 @@ class DeviceWindow(QMainWindow):
         self.refresh_button = button("刷新")
         self.refresh_button.clicked.connect(monitor.refresh)
         list_actions.addWidget(self.refresh_button)
+        self.scan_button = button("扫描局域网")
+        self.scan_button.clicked.connect(self._open_discovery)
+        list_actions.addWidget(self.scan_button)
         self.add_button = button("添加电脑")
         self.add_button.clicked.connect(lambda: self.edit_host(None))
         list_actions.addWidget(self.add_button)
@@ -141,7 +141,7 @@ class DeviceWindow(QMainWindow):
         layout.addWidget(self.pages, 1)
 
         row_actions = QHBoxLayout()
-        self.select_all = _SelectAll("全选")
+        self.select_all = SelectAll("全选")
         self.select_all.setCursor(Qt.CursorShape.PointingHandCursor)
         self.select_all.checkStateChanged.connect(self._select_all)
         row_actions.addWidget(self.select_all)
@@ -182,7 +182,8 @@ class DeviceWindow(QMainWindow):
         footer.addWidget(self.wake_button)
         layout.addLayout(footer)
 
-        QWidget.setTabOrder(self.refresh_button, self.add_button)
+        QWidget.setTabOrder(self.refresh_button, self.scan_button)
+        QWidget.setTabOrder(self.scan_button, self.add_button)
         QWidget.setTabOrder(self.add_button, self.table)
         QWidget.setTabOrder(self.table, self.select_all)
         QWidget.setTabOrder(self.select_all, self.edit_button)
@@ -287,6 +288,8 @@ class DeviceWindow(QMainWindow):
         editable = not self.load_error and not self.monitor.sending
         self.add_button.setEnabled(editable and total < MAX_HOSTS)
         self.add_button.setToolTip("最多管理 64 台电脑。" if total == MAX_HOSTS else "")
+        self.scan_button.setEnabled(self.add_button.isEnabled())
+        self.scan_button.setToolTip(self.add_button.toolTip())
         self.edit_button.setEnabled(editable and self._active() is not None)
         self.remove_button.setEnabled(self.edit_button.isEnabled())
         self.refresh_button.setEnabled(bool(total) and not self.monitor.scanning)
@@ -315,6 +318,23 @@ class DeviceWindow(QMainWindow):
         if host := self._active():
             self.edit_host(host)
 
+    def _save_inventory(self, hosts: tuple[Host, ...], preferred: Host | None = None) -> None:
+        self.store.save(hosts)
+        if hosts != self.monitor.hosts:
+            self._preferred_host = preferred
+            self.monitor.set_hosts(hosts)
+
+    @Slot()
+    def _open_discovery(self) -> None:
+        def save(hosts: tuple[Host, ...]) -> None:
+            self._save_inventory((*self.monitor.hosts, *hosts), hosts[0])
+            self._notice(f"已添加 {len(hosts)} 台。", "success")
+
+        dialog = DiscoveryDialog(self, self.scanner, self.monitor.hosts, save)
+        if dialog.exec():
+            self.table.setFocus()
+        dialog.deleteLater()
+
     def edit_host(self, original: Host | None) -> None:
         def save(host: Host) -> None:
             hosts = self.monitor.hosts
@@ -323,9 +343,7 @@ class DeviceWindow(QMainWindow):
                 if original
                 else (*hosts, host)
             )
-            self.store.save(new)
-            self._preferred_host = host
-            self.monitor.set_hosts(new)
+            self._save_inventory(new, host)
             self._notice("已保存电脑。", "success")
 
         dialog = HostDialog(self, save, original)
@@ -346,11 +364,10 @@ class DeviceWindow(QMainWindow):
             return
         new = tuple(existing for existing in self.monitor.hosts if existing != host)
         try:
-            self.store.save(new)
+            self._save_inventory(new)
         except StoreError as error:
             self._notice("移除失败，请检查写入权限。", "error", str(error))
         else:
-            self.monitor.set_hosts(new)
             self._notice("已移除电脑。", "success")
             if new:
                 self.table.setFocus()

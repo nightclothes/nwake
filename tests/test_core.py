@@ -1,17 +1,35 @@
+import ctypes
 import json
 import socket
 import sys
 import unittest
+from ctypes import wintypes
+from ipaddress import IPv4Address, IPv4Interface
 from pathlib import Path
 from struct import pack
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from nwake.discovery import LanNetwork
 from nwake.hosts import Host, HostError, HostStore, StoreError, data_directory
-from nwake.network import Reachability, _interpret_echo, probe_ipv4, send_wake
+from nwake.network import Reachability, _interpret_echo, probe_ipv4, resolve_mac, send_wake
 
 
 class InventoryTest(unittest.TestCase):
+    def test_discovery_bounds_broad_subnets_and_excludes_local_and_saved_ipv4(self):
+        network = LanNetwork(
+            "LAN", IPv4Interface("10.2.67.10/16"), frozenset({IPv4Address("10.2.67.11")})
+        )
+        saved = Host("工作站", "10.2.67.12", "02123456789a")
+        targets = network.targets((saved,))
+        self.assertEqual(str(network.scope), "10.2.67.0/24")
+        self.assertEqual(len(targets), 253)
+        self.assertEqual((targets[0], targets[-1]), ("10.2.67.0", "10.2.67.255"))
+        self.assertFalse({"10.2.67.10", "10.2.67.11", saved.ip}.intersection(targets))
+        small = LanNetwork("LAN", IPv4Interface("192.0.2.5/30"))
+        self.assertEqual(small.targets(()), ("192.0.2.6",))
+
     def test_packaged_host_inventory_is_saved_beside_the_executable(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -73,6 +91,21 @@ class InventoryTest(unittest.TestCase):
 
 
 class NetworkTest(unittest.TestCase):
+    def test_arp_uses_the_selected_source_and_returns_exact_mac(self):
+        def send_arp(destination, source, buffer, size_pointer):
+            self.assertEqual(destination.to_bytes(4, sys.byteorder).hex(), "c0000206")
+            self.assertEqual(source.to_bytes(4, sys.byteorder).hex(), "c0000205")
+            size = ctypes.cast(size_pointer, ctypes.POINTER(wintypes.ULONG)).contents
+            self.assertGreaterEqual(size.value, 6)
+            ctypes.memmove(buffer, bytes.fromhex("02123456789a"), 6)
+            size.value = 6
+            return 0
+
+        with patch("nwake.network._arp_api", return_value=SimpleNamespace(SendARP=send_arp)):
+            self.assertEqual(resolve_mac("192.0.2.6", "192.0.2.5"), "02:12:34:56:78:9A")
+        with patch("nwake.network._arp_api", return_value=SimpleNamespace(SendARP=lambda *_: 67)):
+            self.assertIsNone(resolve_mac("192.0.2.6", "192.0.2.5"))
+
     def test_wake_wire_format_and_target(self):
         for prefix, broadcast in ((None, "255.255.255.255"), (25, "192.168.1.127")):
             with self.subTest(prefix=prefix), patch("nwake.network.socket.socket") as factory:
