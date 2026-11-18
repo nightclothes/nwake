@@ -3,30 +3,45 @@
 from collections.abc import Callable
 from html import escape
 
-from PySide6.QtCore import QSignalBlocker, Qt, Slot
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QPointF, QSignalBlocker, Qt, Slot
+from PySide6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import (
-    QAbstractItemView,
     QComboBox,
     QDialog,
+    QFrame,
     QHBoxLayout,
-    QHeaderView,
     QProgressBar,
+    QSizePolicy,
     QStackedWidget,
-    QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from nwake.dialogs import SelectAll, button, label
+from nwake.device_table import DeviceTable
+from nwake.dialogs import SelectAll, button, label, set_label_tone
 from nwake.discovery import LanNetwork, LanScanner, local_networks
 from nwake.hosts import MAX_HOSTS, Host, HostError, StoreError
+from nwake.theme import MUTED, ui_font
 
 _CHECKED = Qt.CheckState.Checked
 _UNCHECKED = Qt.CheckState.Unchecked
 _PARTIAL = Qt.CheckState.PartiallyChecked
 _HOST = Qt.ItemDataRole.UserRole
+
+
+class _NetworkPicker(QComboBox):
+    def paintEvent(self, event: QPaintEvent) -> None:
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor(MUTED), 1.5)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        x, y = self.width() - 15, self.height() / 2
+        painter.drawPolyline([QPointF(x - 4, y - 2), QPointF(x, y + 2), QPointF(x + 4, y - 2)])
+        painter.end()
 
 
 class DiscoveryDialog(QDialog):
@@ -39,71 +54,84 @@ class DiscoveryDialog(QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("扫描局域网")
-        self.setMinimumSize(490, 335)
-        self.resize(590, 410)
+        self.setMinimumSize(510, 376)
+        self.resize(620, 454)
         self._scanner = scanner
         self._existing = existing
         self._save = save
         self._capacity = MAX_HOSTS - len(existing)
         self._rows: dict[str, int] = {}
+        self._pending_names: set[str] = set()
         self._total = 0
+        self._named = 0
         self._save_failed = False
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(10)
+        layout.setContentsMargins(16, 16, 16, 16)
+        panel = QFrame(objectName="panel")
+        workspace = QVBoxLayout(panel)
+        workspace.setContentsMargins(12, 12, 12, 10)
+        workspace.setSpacing(10)
+        layout.addWidget(panel)
+
         scope = QHBoxLayout()
-        self.network = QComboBox()
+        scope.setSpacing(8)
+        self.network = _NetworkPicker()
         self.network.setAccessibleName("扫描网段")
+        self.network.setAccessibleDescription("切换网段后开始扫描。")
+        self.network.setPlaceholderText("—")
         self.network.setSizeAdjustPolicy(
             QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
         )
-        self.network.setMinimumContentsLength(24)
+        self.network.setMinimumContentsLength(12)
         self.network.setMaxVisibleItems(8)
         self.network.currentIndexChanged.connect(self._begin)
+        scope_label = label("扫描网段", muted=True)
+        scope_label.setBuddy(self.network)
+        scope.addWidget(scope_label)
         scope.addWidget(self.network, 1)
         self.scan_button = button("重新扫描")
         self.scan_button.setFixedWidth(self.scan_button.sizeHint().width())
         self.scan_button.setAutoDefault(False)
         self.scan_button.clicked.connect(self._toggle_scan)
         scope.addWidget(self.scan_button)
-        layout.addLayout(scope)
+        workspace.addLayout(scope)
 
-        self.feedback = QStackedWidget()
-        self.status = label(muted=True)
-        self.status.setMinimumHeight(23)
-        self.feedback.addWidget(self.status)
+        feedback = QFrame(objectName="scanFeedback")
+        feedback_layout = QVBoxLayout(feedback)
+        feedback_layout.setContentsMargins(10, 7, 10, 7)
+        feedback_layout.setSpacing(5)
+        readout = QHBoxLayout()
+        self.status = label()
+        self.status.setFont(ui_font(10, QFont.Weight.DemiBold))
+        self.status.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        readout.addWidget(self.status, 1)
+        self.name_summary = label()
+        self.name_summary.setObjectName("nameSummary")
+        readout.addWidget(self.name_summary)
+        feedback_layout.addLayout(readout)
         self.progress_bar = QProgressBar()
         self.progress_bar.setAccessibleName("扫描进度")
-        self.progress_bar.setFormat("扫描中 %v / %m")
-        self.progress_bar.setMinimumHeight(23)
-        self.feedback.addWidget(self.progress_bar)
-        layout.addWidget(self.feedback)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(4)
+        progress_size = self.progress_bar.sizePolicy()
+        progress_size.setRetainSizeWhenHidden(True)
+        self.progress_bar.setSizePolicy(progress_size)
+        feedback_layout.addWidget(self.progress_bar)
+        workspace.addWidget(feedback)
 
-        self.results = QTableWidget(0, 4)
-        self.results.setAccessibleName("扫描结果")
+        mac_width = QFontMetrics(QFont("Consolas", 10)).horizontalAdvance("FF:FF:FF:FF:FF:FF") + 24
+        self.results = DeviceTable("扫描结果", "MAC 地址", max(154, mac_width))
         self.results.setAccessibleDescription("勾选要添加的设备。")
-        self.results.setHorizontalHeaderLabels(("", "主机名", "IPv4 地址", "MAC 地址"))
-        self.results.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.results.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.results.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.results.setTabKeyNavigation(False)
-        self.results.setColumnWidth(0, 39)
-        self.results.setColumnWidth(2, 130)
-        self.results.setColumnWidth(3, 158)
-        header = self.results.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self.results.verticalHeader().hide()
-        self.results.verticalHeader().setDefaultSectionSize(34)
-        self.results.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.results.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.results.setShowGrid(False)
-        self.results.setWordWrap(False)
-        self.results.setAlternatingRowColors(True)
         self.results.itemChanged.connect(self._sync_selection)
-        layout.addWidget(self.results, 1)
+        self.result_pages = QStackedWidget()
+        self.result_pages.addWidget(self.results)
+        self.empty_hint = label(muted=True)
+        self.empty_hint.setObjectName("scanEmpty")
+        self.empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.empty_hint.setWordWrap(True)
+        self.result_pages.addWidget(self.empty_hint)
+        workspace.addWidget(self.result_pages, 1)
 
         actions = QHBoxLayout()
         self.select_all = SelectAll("全选")
@@ -121,10 +149,17 @@ class DiscoveryDialog(QDialog):
         self.add_button.setAutoDefault(False)
         self.add_button.clicked.connect(self._add_selected)
         actions.addWidget(self.add_button)
-        layout.addLayout(actions)
+        workspace.addLayout(actions)
+
+        QWidget.setTabOrder(self.network, self.scan_button)
+        QWidget.setTabOrder(self.scan_button, self.results)
+        QWidget.setTabOrder(self.results, self.select_all)
+        QWidget.setTabOrder(self.select_all, close)
+        QWidget.setTabOrder(close, self.add_button)
 
         scanner.found.connect(self._found)
         scanner.renamed.connect(self._renamed)
+        scanner.name_unresolved.connect(self._name_unresolved)
         scanner.progress.connect(self._progress)
         scanner.finished.connect(self._finished)
         self.finished.connect(scanner.cancel)
@@ -150,9 +185,13 @@ class DiscoveryDialog(QDialog):
     @Slot()
     def _begin(self) -> None:
         self._rows.clear()
+        self._pending_names.clear()
         self.results.setRowCount(0)
+        self.result_pages.setCurrentWidget(self.results)
+        self._named = 0
         self._save_failed = False
         self.status.setToolTip("")
+        self._sync_names()
         self._sync_selection()
         network: LanNetwork | None = self.network.currentData()
         self.network.setToolTip(escape(self.network.currentText()))
@@ -160,6 +199,7 @@ class DiscoveryDialog(QDialog):
             self._scanner.cancel()
             self.scan_button.setText("重试")
             self._show_status("没有可用的 IPv4 网段")
+            self._show_empty("连接到局域网后重试。")
             return
         self.scan_button.setText("停止")
         self._scanner.start(network, self._existing)
@@ -169,8 +209,11 @@ class DiscoveryDialog(QDialog):
         if self._scanner.scanning:
             self._scanner.cancel()
             self.scan_button.setText("重新扫描")
+            self._mark_pending_stopped()
             if not self._save_failed:
                 self._show_status(f"已停止 · {self.results.rowCount()} 台")
+            if not self.results.rowCount():
+                self._show_empty("可重新扫描以查找设备。")
         else:
             self._reload_networks()
 
@@ -179,8 +222,14 @@ class DiscoveryDialog(QDialog):
         self._total = total
         self.progress_bar.setRange(0, max(total, 1))
         self.progress_bar.setValue(completed)
-        if completed < total and not self._save_failed:
-            self.feedback.setCurrentWidget(self.progress_bar)
+        if self._save_failed:
+            return
+        if completed < total:
+            self.status.setText(f"正在扫描 · {completed} / {total}")
+            set_label_tone(self.status, "info")
+            self.progress_bar.show()
+        elif self._scanner.scanning:
+            self._show_status(f"发现 {self.results.rowCount()} 台 · 正在查询主机名")
 
     @Slot(int, str)
     def _finished(self, failed: int, detail: str) -> None:
@@ -196,21 +245,29 @@ class DiscoveryDialog(QDialog):
             text = f"发现 {count} 台"
         else:
             text = "未发现可添加的设备"
-        self._show_status(text, detail)
+        self._show_status(text, detail, error=bool(failed))
+        if not count:
+            self._show_empty("可切换网段后重新扫描。")
 
-    def _show_status(self, text: str, detail: str = "") -> None:
+    def _show_status(self, text: str, detail: str = "", *, error: bool = False) -> None:
         self.status.setText(text)
-        self.status.setToolTip(escape(detail))
-        self.feedback.setCurrentWidget(self.status)
+        self.status.setToolTip(escape(detail or text))
+        set_label_tone(self.status, "error" if error else "info")
+        self.progress_bar.hide()
+
+    def _show_empty(self, text: str) -> None:
+        self.empty_hint.setText(text)
+        self.result_pages.setCurrentWidget(self.empty_hint)
 
     @Slot(object)
     def _found(self, host: Host) -> None:
         row = self.results.rowCount()
         self._rows[host.ip] = row
+        self._pending_names.add(host.ip)
         flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
         with QSignalBlocker(self.results):
             self.results.insertRow(row)
-            for column, text in enumerate(("", "—", host.ip, host.mac)):
+            for column, text in enumerate(("", "查询中", host.ip, host.mac)):
                 item = QTableWidgetItem(text)
                 item.setFlags(flags)
                 if column == 0:
@@ -218,19 +275,53 @@ class DiscoveryDialog(QDialog):
                     item.setCheckState(_UNCHECKED)
                     item.setData(_HOST, host)
                     item.setData(Qt.ItemDataRole.AccessibleTextRole, f"勾选 {host.ip}")
-                elif column >= 2:
-                    item.setFont(QFont("Consolas", 10))
+                elif column == 1:
+                    item.setForeground(QBrush(QColor(MUTED)))
+                else:
+                    item.setFont(self.results.address_font)
                 self.results.setItem(row, column, item)
+        self._sync_names()
         self._sync_selection()
 
     @Slot(object)
     def _renamed(self, host: Host) -> None:
         row = self._rows.get(host.ip)
         if row is not None:
+            self._pending_names.discard(host.ip)
             with QSignalBlocker(self.results):
-                self.results.item(row, 0).setData(_HOST, host)
-                self.results.item(row, 1).setText(host.name)
-                self.results.item(row, 1).setToolTip(escape(host.name))
+                check = self.results.item(row, 0)
+                if check.data(_HOST).name == host.ip:
+                    self._named += 1
+                check.setData(_HOST, host)
+                check.setData(Qt.ItemDataRole.AccessibleTextRole, f"勾选 {host.name}，{host.ip}")
+                name = self.results.item(row, 1)
+                name.setText(host.name)
+                name.setForeground(QBrush())
+                name.setFont(ui_font(10, QFont.Weight.DemiBold))
+                name.setToolTip(escape(host.name))
+            self._sync_names()
+
+    @Slot(str)
+    def _name_unresolved(self, ip: str) -> None:
+        if ip not in self._pending_names:
+            return
+        self._pending_names.remove(ip)
+        with QSignalBlocker(self.results):
+            name = self.results.item(self._rows[ip], 1)
+            name.setText("未识别")
+            name.setToolTip("添加后可在电脑列表中编辑主机名。")
+
+    def _sync_names(self) -> None:
+        total = self.results.rowCount()
+        self.name_summary.setText(f"已识别主机名 {self._named} / {total}" if total else "")
+
+    def _mark_pending_stopped(self) -> None:
+        with QSignalBlocker(self.results):
+            for ip in self._pending_names:
+                name = self.results.item(self._rows[ip], 1)
+                name.setText("—")
+                name.setToolTip("主机名查询已停止。")
+        self._pending_names.clear()
 
     def _selected(self) -> tuple[Host, ...]:
         return tuple(
@@ -251,6 +342,7 @@ class DiscoveryDialog(QDialog):
         self.add_button.setEnabled(0 < count <= self._capacity)
         suffix = f" · 可添加 {self._capacity} 台" if count > self._capacity else ""
         self.selection.setText(f"已勾选 {count} 台{suffix}")
+        set_label_tone(self.selection, "error" if suffix else "info")
 
     @Slot(Qt.CheckState)
     def _select_all(self, state: Qt.CheckState) -> None:
@@ -269,6 +361,6 @@ class DiscoveryDialog(QDialog):
         except (StoreError, HostError) as error:
             self._save_failed = True
             text = "保存失败，请检查写入权限" if isinstance(error, StoreError) else str(error)
-            self._show_status(text, str(error))
+            self._show_status(text, str(error), error=True)
         else:
             self.accept()

@@ -3,10 +3,12 @@
 from collections.abc import Callable
 
 from PySide6.QtCore import Qt, Slot
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -17,6 +19,7 @@ from PySide6.QtWidgets import (
 )
 
 from nwake.hosts import Host, HostError, StoreError
+from nwake.theme import ui_font
 
 
 class SelectAll(QCheckBox):
@@ -31,6 +34,14 @@ def label(text: str = "", *, muted: bool = False) -> QLabel:
     if muted:
         widget.setProperty("muted", True)
     return widget
+
+
+def set_label_tone(widget: QLabel, tone: str) -> None:
+    if widget.property("tone") != tone:
+        widget.setProperty("tone", tone)
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+        widget.update()
 
 
 def button(text: str, variant: str = "neutral") -> QPushButton:
@@ -51,19 +62,24 @@ def message(
 ) -> bool:
     dialog = QDialog(parent)
     dialog.setWindowTitle(title)
-    dialog.setMinimumWidth(390)
+    dialog.setMinimumWidth(400)
     layout = QVBoxLayout(dialog)
-    layout.setContentsMargins(18, 16, 18, 14)
+    layout.setContentsMargins(16, 16, 16, 16)
     layout.setSpacing(12)
+    panel = QFrame(objectName="panel")
+    content = QVBoxLayout(panel)
+    content.setContentsMargins(14, 13, 14, 13)
+    content.setSpacing(8)
     explanation = label(text)
     explanation.setWordWrap(True)
     explanation.setMaximumWidth(430)
-    layout.addWidget(explanation)
+    content.addWidget(explanation)
     if detail:
         details = QPlainTextEdit(detail, readOnly=True)
         details.setAccessibleName("操作详情")
         details.setMaximumHeight(135)
-        layout.addWidget(details)
+        content.addWidget(details)
+    layout.addWidget(panel)
     actions = QHBoxLayout()
     actions.addStretch()
     cancel = button("取消" if action else "关闭")
@@ -87,7 +103,7 @@ class HostDialog(QDialog):
         (
             "prefix",
             "子网前缀（可选）",
-            "留空使用默认广播",
+            "例如 24",
             "例如填写 24，使用 IPv4 所在子网的广播地址。",
         ),
     )
@@ -95,16 +111,22 @@ class HostDialog(QDialog):
     def __init__(self, parent: QWidget, save: Callable[[Host], None], original: Host | None = None):
         super().__init__(parent)
         self.setWindowTitle("编辑电脑" if original else "添加电脑")
-        self.setMinimumWidth(410)
+        self.setMinimumWidth(430)
         self._save = save
         self._original: dict[str, str] = {}
         self.fields: dict[str, QLineEdit] = {}
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 18, 20, 16)
+        layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
+        panel = QFrame(objectName="panel")
+        content = QVBoxLayout(panel)
+        content.setContentsMargins(14, 14, 14, 12)
+        content.setSpacing(12)
         form = QFormLayout()
-        form.setVerticalSpacing(10)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(9)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
         for key, title, example, hint in self._fields:
@@ -112,23 +134,29 @@ class HostDialog(QDialog):
             field.setObjectName(key)
             field.setMaxLength(128)
             field.setPlaceholderText(example)
+            field.setAccessibleName(title)
             field.setAccessibleDescription(hint)
             field.setToolTip(hint)
+            if key != "name":
+                field.setFont(QFont("Consolas", 10))
             current = getattr(original, key) if original else None
             start = str(current) if current is not None else ""
             self._original[key] = start
             field.setText(start)
             self.fields[key] = field
-            caption = label(title)
+            caption = label(title, muted=key == "prefix")
+            caption.setFont(ui_font(10, QFont.Weight.DemiBold))
             caption.setBuddy(field)
             form.addRow(caption, field)
-        layout.addLayout(form)
+        content.addLayout(form)
 
-        self.error = label()
-        self.error.setObjectName("errorText")
+        self.error = label("子网前缀留空时使用默认广播。", muted=True)
+        self.error.setObjectName("formNote")
         self.error.setWordWrap(True)
-        self.error.setMinimumHeight(self.error.fontMetrics().lineSpacing() * 2)
-        layout.addWidget(self.error)
+        self.error.setMinimumHeight(self.error.fontMetrics().lineSpacing() * 2 + 10)
+        self.error.setAlignment(Qt.AlignmentFlag.AlignVCenter)
+        content.addWidget(self.error)
+        layout.addWidget(panel)
 
         actions = QHBoxLayout()
         actions.addStretch()
@@ -140,10 +168,12 @@ class HostDialog(QDialog):
         submit.clicked.connect(self._submit)
         actions.addWidget(submit)
         layout.addLayout(actions)
+        self.resize(450, self.sizeHint().height())
         self.fields["name"].setFocus()
 
     @Slot()
     def _submit(self) -> None:
+        self.error.setToolTip("")
         for field in self.fields.values():
             if field.property("invalid"):
                 self._set_invalid(field, False)
@@ -168,6 +198,8 @@ class HostDialog(QDialog):
             self.error.setToolTip(str(error))
         else:
             self.accept()
+            return
+        set_label_tone(self.error, "error")
 
     @staticmethod
     def _set_invalid(field: QLineEdit, invalid: bool) -> None:

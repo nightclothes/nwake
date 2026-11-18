@@ -8,7 +8,6 @@ from time import monotonic
 from unittest.mock import patch
 
 from PySide6.QtCore import QEvent, Qt, QTimer
-from PySide6.QtGui import QFont
 from PySide6.QtNetwork import QHostInfo
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QPushButton, QSystemTrayIcon
@@ -20,7 +19,7 @@ from nwake.discovery_dialog import DiscoveryDialog
 from nwake.hosts import Host, HostStore, StoreError
 from nwake.monitor import Monitor
 from nwake.network import ProbeResult, Reachability
-from nwake.theme import STYLESHEET, app_icon
+from nwake.theme import STYLESHEET, NwakeStyle, app_icon, ui_font
 from nwake.window import DeviceWindow
 
 DESK = Host("书房电脑", "192.0.2.21", "02:01:02:03:04:05")
@@ -32,10 +31,8 @@ class DeviceWindowTest(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
         cls.app.setQuitOnLastWindowClosed(False)
-        font = QFont("Segoe UI", 10)
-        font.setFamilies(["Segoe UI", "Microsoft YaHei UI"])
-        cls.app.setFont(font)
-        cls.app.setStyle("Fusion")
+        cls.app.setFont(ui_font())
+        cls.app.setStyle(NwakeStyle())
         cls.app.setStyleSheet(STYLESHEET)
 
     def setUp(self):
@@ -142,11 +139,13 @@ class DeviceWindowTest(unittest.TestCase):
         subnet = LanNetwork("测试网段", IPv4Interface("192.0.2.17/29"))
         found = (
             Host("lab-pc", "192.0.2.18", "02:12:00:00:00:18", 29),
-            Host("192.0.2.19", "192.0.2.19", "02:12:00:00:00:19", 29),
+            Host("OFFICE-PC", "192.0.2.19", "02:12:00:00:00:19", 29),
             Host("192.0.2.20", "192.0.2.20", "02:12:00:00:00:20", 29),
         )
         replies = {host.ip: host.mac for host in found} | {NAS.ip: DESK.mac}
         requests = []
+        netbios_requests = []
+        release = Event()
 
         def arp(ip, source):
             requests.append((ip, source))
@@ -157,26 +156,47 @@ class DeviceWindowTest(unittest.TestCase):
         def lookup(ip, receiver, _slot):
             lookup_id = next(ids)
             info = QHostInfo(lookup_id)
-            info.setHostName("lab-pc." if ip == found[0].ip else ip)
+            if ip == found[0].ip:
+                info.setHostName("lab-pc.")
+            elif ip == found[1].ip:
+                info.setError(QHostInfo.HostInfoError.HostNotFound)
+            else:
+                info.setHostName(ip)
             QTimer.singleShot(0, lambda: receiver._record_name(info))
             return lookup_id
 
+        def netbios(ip, source):
+            netbios_requests.append((ip, source))
+            if ip == found[1].ip and release.wait(4):
+                return found[1].name
+            raise TimeoutError
+
         self.window.scanner._arp = arp
         self.window.scanner._lookup = lookup
+        self.window.scanner._netbios = netbios
 
         def import_results(dialog):
             self.assertIsInstance(dialog, DiscoveryDialog)
+            try:
+                self.wait_until(lambda: "正在查询主机名" in dialog.status.text())
+                self.assertEqual(dialog.scan_button.text(), "停止")
+            finally:
+                release.set()
             self.wait_until(lambda: not self.window.scanner.scanning)
             grid = dialog.results
             rows = {grid.item(row, 2).text(): row for row in range(grid.rowCount())}
             self.assertEqual(set(rows), {host.ip for host in found})
             self.assertNotIn((DESK.ip, "192.0.2.17"), requests)
             self.assertTrue(all(source == "192.0.2.17" for _, source in requests))
-            self.wait_until(lambda: grid.item(rows[found[0].ip], 1).text() == "lab-pc")
+            self.assertCountEqual(netbios_requests, [(host.ip, "192.0.2.17") for host in found[1:]])
+            self.assertEqual(grid.item(rows[found[0].ip], 1).text(), "lab-pc")
+            self.assertEqual(grid.item(rows[found[1].ip], 1).text(), "OFFICE-PC")
+            self.assertEqual(grid.item(rows[found[2].ip], 1).text(), "未识别")
+            self.assertEqual(dialog.name_summary.text(), "已识别主机名 2 / 3")
             self.assertEqual(self.store.load(), (DESK,))
 
             first = rows[found[0].ip]
-            grid.setCurrentCell(first, 0)
+            grid.setCurrentCell(first, 1)
             QTest.keyClick(grid, Qt.Key.Key_Space)
             self.assertTrue(dialog.add_button.isEnabled())
             grid.item(rows[found[1].ip], 0).setCheckState(Qt.CheckState.Checked)
@@ -212,6 +232,7 @@ class DeviceWindowTest(unittest.TestCase):
 
         self.window.scanner._arp = arp
         self.window.scanner._lookup = lambda *_: -1
+        self.window.scanner._netbios = lambda *_: None
 
         def switch(dialog):
             try:
@@ -230,6 +251,49 @@ class DeviceWindowTest(unittest.TestCase):
             self.with_modal(self.window.scan_button, switch)
         self.assertEqual(self.store.load(), ())
 
+    def test_stopping_discovery_discards_in_flight_names(self):
+        self.launch()
+        network = LanNetwork("测试网段", IPv4Interface("192.0.2.17/29"))
+        timed_out, pending = "192.0.2.18", "192.0.2.19"
+        replies = {timed_out: "02:12:00:00:00:18", pending: "02:12:00:00:00:19"}
+        started = Event()
+        release = Event()
+
+        def netbios(ip, _source):
+            if ip == timed_out:
+                raise TimeoutError
+            started.set()
+            release.wait(7)
+            return "OLD-PC"
+
+        scanner = self.window.scanner
+        scanner._arp = lambda ip, _: replies.get(ip)
+        scanner._lookup = lambda *_: -1
+        scanner._netbios = netbios
+
+        def stop(dialog):
+            try:
+                grid = dialog.results
+                self.wait_until(lambda: started.is_set() and grid.rowCount() == 2)
+                names = {grid.item(row, 2).text(): grid.item(row, 1) for row in range(2)}
+                self.wait_until(lambda: names[timed_out].text() == "未识别")
+                self.assertTrue(scanner.scanning)
+                self.assertEqual(names[pending].text(), "查询中")
+                dialog.scan_button.click()
+                self.assertFalse(scanner.scanning)
+                self.assertIn("已停止", dialog.status.text())
+                self.assertEqual(names[timed_out].text(), "未识别")
+                self.assertEqual(names[pending].toolTip(), "主机名查询已停止。")
+            finally:
+                release.set()
+            self.wait_until(lambda: not scanner._netbios_pool.activeThreadCount())
+            self.app.processEvents()
+            self.assertEqual(names[pending].text(), "—")
+            dialog.reject()
+
+        with patch("nwake.discovery_dialog.local_networks", return_value=(network,)):
+            self.with_modal(self.window.scan_button, stop)
+
     def test_batch_confirmation_partial_failure_and_no_false_online(self):
         sent = []
 
@@ -241,10 +305,12 @@ class DeviceWindowTest(unittest.TestCase):
         self.launch((DESK, NAS), wake=wake, probe=lambda _: ProbeResult(Reachability.NO_REPLY))
         self.monitor.start()
         self.wait_until(lambda: self.window.table.item(0, 3).text() == "无响应")
-        self.window.table.setCurrentCell(0, 0)
+        self.window.table.setCurrentCell(0, 1)
         self.window.table.setFocus()
         QTest.keyClick(self.window.table, Qt.Key.Key_Space)
         self.assertEqual(self.window.selection_summary.text(), "已勾选 1 台")
+        QTest.keyClick(self.window.table, Qt.Key.Key_Tab)
+        self.assertIs(self.window.focusWidget(), self.window.select_all)
         self.assertEqual(self.window.select_all.checkState(), Qt.CheckState.PartiallyChecked)
         QTest.mouseClick(self.window.select_all, Qt.MouseButton.LeftButton)
         self.assertEqual(self.window.selection_summary.text(), "已勾选 2 台")

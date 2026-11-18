@@ -15,7 +15,7 @@
 
 打开扫描窗口后，优先扫描 Windows 默认路由对应网卡的网段。可在下拉框切换活动网卡的 IPv4 网段。`/22` 至 `/30` 扫描整个网段，更大的网段扫描本机 IPv4 所在的 `/24`，具体范围显示在下拉框中。添加时保存实际网段前缀，以便计算唤醒广播地址。
 
-扫描使用 Windows [SendARP](https://learn.microsoft.com/zh-cn/windows/win32/api/iphlpapi/nf-iphlpapi-sendarp) 获取同网段设备的 MAC。扫描结果也可能包含路由器等其他联网设备。程序会尝试反向解析主机名，未取得名称时用 IPv4 作为名称。可手动填写扫描未找到的电脑。
+扫描使用 Windows [SendARP](https://learn.microsoft.com/zh-cn/windows/win32/api/iphlpapi/nf-iphlpapi-sendarp) 获取同网段设备的 MAC。程序对发现的设备先做系统反向解析，缺少可用名称时再从所选网卡向该 IP 查询 NetBIOS 计算机名。扫描窗口会提示名称仍在查询，并逐条更新结果。两种方式均未取得名称时，添加后以 IPv4 作为名称，可在列表中编辑。扫描结果也可能包含路由器等其他联网设备。
 
 ## 本地数据
 

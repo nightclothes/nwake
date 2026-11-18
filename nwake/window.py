@@ -4,26 +4,24 @@ from collections.abc import Callable
 from html import escape
 
 from PySide6.QtCore import QSignalBlocker, Qt, Signal, Slot
-from PySide6.QtGui import QBrush, QCloseEvent, QColor, QFont, QIcon
+from PySide6.QtGui import QCloseEvent, QFont, QIcon
 from PySide6.QtWidgets import (
-    QAbstractItemView,
     QFrame,
     QHBoxLayout,
-    QHeaderView,
     QMainWindow,
     QStackedWidget,
-    QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from nwake.dialogs import HostDialog, SelectAll, button, label, message
+from nwake.device_table import DeviceTable, StatusPill
+from nwake.dialogs import HostDialog, SelectAll, button, label, message, set_label_tone
 from nwake.discovery import LanScanner
 from nwake.discovery_dialog import DiscoveryDialog
 from nwake.hosts import MAX_HOSTS, Host, HostStore, StoreError
 from nwake.monitor import Monitor
-from nwake.theme import STATUS
+from nwake.theme import STATUS, ui_font
 
 _CHECKED = Qt.CheckState.Checked
 _PARTIAL = Qt.CheckState.PartiallyChecked
@@ -37,8 +35,8 @@ class DeviceWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Nwake · 局域网开机")
         self.setWindowIcon(icon)
-        self.setMinimumSize(470, 400)
-        self.resize(550, 466)
+        self.setMinimumSize(470, 404)
+        self.resize(570, 498)
         self.store = store
         self.monitor = monitor
         monitor.setParent(self)
@@ -53,18 +51,19 @@ class DeviceWindow(QMainWindow):
         root = QWidget(objectName="main")
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(16, 16, 16, 13)
+        layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(12)
 
         masthead = QFrame(objectName="masthead")
         head = QHBoxLayout(masthead)
-        head.setContentsMargins(14, 9, 17, 9)
+        head.setContentsMargins(14, 10, 17, 10)
+        head.setSpacing(10)
         logo = label()
-        logo.setPixmap(icon.pixmap(42, 42))
+        logo.setPixmap(icon.pixmap(40, 40))
         head.addWidget(logo)
         title = label("Nwake")
         title.setProperty("header", True)
-        title.setFont(QFont("Segoe UI", 18, QFont.Weight.DemiBold))
+        title.setFont(ui_font(19, QFont.Weight.DemiBold))
         head.addWidget(title)
         head.addStretch()
         summary = QVBoxLayout()
@@ -76,71 +75,69 @@ class DeviceWindow(QMainWindow):
         summary.addWidget(self.counter)
         summary_label = label("在线 / 总数")
         summary_label.setObjectName("headerSub")
+        summary_label.setFont(ui_font(9))
         summary_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         summary.addWidget(summary_label)
         head.addLayout(summary)
         layout.addWidget(masthead)
 
+        panel = QFrame(objectName="panel")
+        workspace = QVBoxLayout(panel)
+        workspace.setContentsMargins(12, 11, 12, 8)
+        workspace.setSpacing(9)
+        layout.addWidget(panel, 1)
+
         list_actions = QHBoxLayout()
+        list_actions.setSpacing(8)
         list_title = label("电脑列表")
-        list_title.setFont(QFont("Microsoft YaHei UI", 11, QFont.Weight.DemiBold))
+        list_title.setFont(ui_font(12, QFont.Weight.DemiBold))
         list_actions.addWidget(list_title)
         list_actions.addStretch()
-        self.refresh_button = button("刷新")
+        self.refresh_button = button("刷新", "quiet")
+        self.refresh_button.setToolTip("刷新电脑在线状态")
         self.refresh_button.clicked.connect(monitor.refresh)
         list_actions.addWidget(self.refresh_button)
-        self.scan_button = button("扫描局域网")
+        self.scan_button = button("扫描局域网", "accent")
         self.scan_button.clicked.connect(self._open_discovery)
         list_actions.addWidget(self.scan_button)
         self.add_button = button("添加电脑")
         self.add_button.clicked.connect(lambda: self.edit_host(None))
         list_actions.addWidget(self.add_button)
-        layout.addLayout(list_actions)
+        workspace.addLayout(list_actions)
 
         self.pages = QStackedWidget()
-        self.empty = QFrame(objectName="empty")
+        self.empty = QFrame()
         empty_layout = QVBoxLayout(self.empty)
         empty_layout.setContentsMargins(14, 16, 14, 16)
+        empty_layout.setSpacing(7)
         empty_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         caption = label("电脑列表不可用" if load_error else "暂无电脑")
         caption.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-        caption.setFont(QFont("Microsoft YaHei UI", 12, QFont.Weight.DemiBold))
+        caption.setFont(ui_font(13, QFont.Weight.DemiBold))
         empty_layout.addWidget(caption)
-        if load_error:
-            recovery = label("请查看详情，修复后重新打开。", muted=True)
-            recovery.setAlignment(Qt.AlignmentFlag.AlignHCenter)
-            recovery.setWordWrap(True)
-            empty_layout.addWidget(recovery)
+        guidance = label(
+            "请查看详情，修复后重新打开。"
+            if load_error
+            else "扫描局域网查找设备，或填写 IP 和 MAC 手动添加。",
+            muted=True,
+        )
+        guidance.setAlignment(Qt.AlignmentFlag.AlignHCenter)
+        guidance.setWordWrap(True)
+        empty_layout.addWidget(guidance)
         self.pages.addWidget(self.empty)
 
-        self.table = QTableWidget(0, 4)
-        self.table.setAccessibleName("电脑列表")
+        self.table = DeviceTable("电脑列表", "状态", 113)
         self.table.setAccessibleDescription("勾选复选框可唤醒一台或多台电脑。选中行可编辑或移除。")
-        self.table.setHorizontalHeaderLabels(("", "主机名", "IPv4 地址", "状态"))
-        self.table.setColumnWidth(0, 39)
-        self.table.setColumnWidth(2, 135)
-        self.table.setColumnWidth(3, 107)
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        self.table.verticalHeader().hide()
-        self.table.verticalHeader().setDefaultSectionSize(36)
-        self.table.setShowGrid(False)
-        self.table.setAlternatingRowColors(True)
-        self.table.setWordWrap(False)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.table.setItemDelegateForColumn(3, StatusPill(self.table))
         self.table.itemChanged.connect(self._item_changed)
         self.table.currentCellChanged.connect(self._sync_actions)
         self.table.cellDoubleClicked.connect(self._open_row)
         self.pages.addWidget(self.table)
-        layout.addWidget(self.pages, 1)
+        workspace.addWidget(self.pages, 1)
 
-        row_actions = QHBoxLayout()
+        self.row_actions = QWidget()
+        row_actions = QHBoxLayout(self.row_actions)
+        row_actions.setContentsMargins(2, 0, 2, 0)
         self.select_all = SelectAll("全选")
         self.select_all.setCursor(Qt.CursorShape.PointingHandCursor)
         self.select_all.checkStateChanged.connect(self._select_all)
@@ -148,18 +145,17 @@ class DeviceWindow(QMainWindow):
         self.selection_summary = label("已勾选 0 台", muted=True)
         row_actions.addWidget(self.selection_summary)
         row_actions.addStretch()
-        self.edit_button = button("编辑")
+        self.edit_button = button("编辑", "quiet")
         self.edit_button.clicked.connect(self._edit_active)
         row_actions.addWidget(self.edit_button)
-        self.remove_button = button("移除")
+        self.remove_button = button("移除", "quiet")
         self.remove_button.clicked.connect(self._remove_active)
         row_actions.addWidget(self.remove_button)
-        layout.addLayout(row_actions)
+        workspace.addWidget(self.row_actions)
 
-        separator = QFrame(frameShape=QFrame.Shape.HLine)
-        layout.addWidget(separator)
-
-        footer = QHBoxLayout()
+        self.footer = QFrame(objectName="panel")
+        footer = QHBoxLayout(self.footer)
+        footer.setContentsMargins(12, 7, 10, 7)
         info = QVBoxLayout()
         info.setSpacing(1)
         self.freshness = label(muted=True)
@@ -167,9 +163,8 @@ class DeviceWindow(QMainWindow):
         self.feedback = label()
         self.feedback.setObjectName("feedback")
         info.addWidget(self.feedback)
-        footer.addLayout(info)
-        footer.addStretch()
-        self.detail_button = button("详情")
+        footer.addLayout(info, 1)
+        self.detail_button = button("详情", "quiet")
         self.detail_button.clicked.connect(self._show_details)
         detail_size = self.detail_button.sizePolicy()
         detail_size.setRetainSizeWhenHidden(True)
@@ -177,10 +172,10 @@ class DeviceWindow(QMainWindow):
         self.detail_button.hide()
         footer.addWidget(self.detail_button)
         self.wake_button = button("唤醒所选", "primary")
-        self.wake_button.setFixedWidth(102)
+        self.wake_button.setFixedWidth(max(112, self.wake_button.sizeHint().width()))
         self.wake_button.clicked.connect(self._wake_selected)
         footer.addWidget(self.wake_button)
-        layout.addLayout(footer)
+        layout.addWidget(self.footer)
 
         QWidget.setTabOrder(self.refresh_button, self.scan_button)
         QWidget.setTabOrder(self.scan_button, self.add_button)
@@ -237,11 +232,12 @@ class DeviceWindow(QMainWindow):
                         item.setCheckState(_CHECKED if host in checked else _UNCHECKED)
                         item.setData(Qt.ItemDataRole.AccessibleTextRole, f"勾选 {host.name}")
                     elif column == 1:
+                        item.setFont(ui_font(10, QFont.Weight.DemiBold))
                         item.setToolTip(escape(f"{host.name} · {host.mac}"))
                     elif column == 2:
-                        item.setFont(QFont("Consolas", 10))
+                        item.setFont(self.table.address_font)
                     elif column == 3:
-                        item.setFont(QFont("Microsoft YaHei UI", 9, QFont.Weight.DemiBold))
+                        item.setFont(ui_font(9, QFont.Weight.DemiBold))
                     self.table.setItem(row, column, item)
             if active in self._shown_hosts:
                 index = self._shown_hosts.index(active)
@@ -257,11 +253,10 @@ class DeviceWindow(QMainWindow):
         with QSignalBlocker(self.table):
             for index, host in enumerate(self._shown_hosts):
                 key, detail = self.monitor.readout(host)
-                text, color = STATUS[key]
                 status = self.table.item(index, 3)
-                if status.text() != text:
-                    status.setText(text)
-                    status.setForeground(QBrush(QColor(color)))
+                if status.data(Qt.ItemDataRole.UserRole) != key:
+                    status.setText(STATUS[key][0])
+                    status.setData(Qt.ItemDataRole.UserRole, key)
                 status.setToolTip(escape(detail))
                 online += key == "online"
         self.counter.setText(f"{online} / {len(self._shown_hosts)}")
@@ -271,6 +266,8 @@ class DeviceWindow(QMainWindow):
             self.freshness.setText("检测中…")
         elif self._shown_hosts and last_scan is not None:
             self.freshness.setText(f"最近检测 {last_scan:%H:%M:%S}")
+        elif self._shown_hosts:
+            self.freshness.setText("等待首次检测")
         else:
             self.freshness.clear()
         self._sync_actions()
@@ -279,6 +276,9 @@ class DeviceWindow(QMainWindow):
     def _sync_actions(self) -> None:
         total = len(self._shown_hosts)
         count = len(self._selected())
+        self.row_actions.setVisible(bool(total))
+        self.footer.setVisible(bool(total or self.feedback.text()))
+        self.wake_button.setVisible(bool(total))
         with QSignalBlocker(self.select_all):
             self.select_all.setCheckState(
                 _UNCHECKED if not count else _CHECKED if count == total else _PARTIAL
@@ -295,6 +295,7 @@ class DeviceWindow(QMainWindow):
         self.refresh_button.setEnabled(bool(total) and not self.monitor.scanning)
         self.wake_button.setEnabled(bool(count) and not self.monitor.sending)
         self.wake_button.setText("正在发送…" if self.monitor.sending else "唤醒所选")
+        self.wake_button.setToolTip("勾选要唤醒的电脑。" if not count else "")
 
     @Slot(QTableWidgetItem)
     def _item_changed(self, item: QTableWidgetItem) -> None:
@@ -405,9 +406,8 @@ class DeviceWindow(QMainWindow):
 
     def _notice(self, text: str, tone: str = "info", detail: str = "") -> None:
         self.feedback.setText(text)
-        self.feedback.setProperty("tone", tone)
-        self.feedback.style().unpolish(self.feedback)
-        self.feedback.style().polish(self.feedback)
+        set_label_tone(self.feedback, tone)
+        self.footer.show()
         self._details = (text, detail) if detail else None
         self.detail_button.setVisible(bool(detail))
 

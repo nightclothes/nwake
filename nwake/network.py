@@ -1,4 +1,4 @@
-"""Wake-on-LAN datagrams, ICMP probes and ARP via the Windows IP Helper API."""
+"""Wake-on-LAN, ICMP, ARP and NetBIOS queries for local computers."""
 
 import ctypes
 import socket
@@ -6,8 +6,9 @@ from ctypes import wintypes
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import cache
-from struct import unpack_from
-from sys import byteorder
+from secrets import randbits
+from struct import Struct, pack, unpack_from
+from sys import byteorder, platform
 
 from nwake.hosts import Host, normalize_mac
 
@@ -15,6 +16,15 @@ WAKE_PORT = 9
 PROBE_TIMEOUT_MS = 750
 _UNREACHABLE = {11002, 11003, 11004, 11005, 11010}
 _INVALID_HANDLE = ctypes.c_void_p(-1).value
+_NBNS_PORT = 137
+_NBNS_TIMEOUT = 0.75
+_NBNS_HEADER = Struct("!6H")
+_NBNS_RECORD = Struct("!HHIH")
+_NBNS_NAME = Struct("!15sBH")
+_NBSTAT = 0x0021
+_IN = 0x0001
+# RFC 1002 first-level encoding of the wildcard '*' followed by 15 null bytes.
+_NBNS_WILDCARD = b"\x20CK" + b"A" * 30 + b"\x00"
 
 
 class Reachability(Enum):
@@ -72,6 +82,52 @@ def resolve_mac(ip: str, source: str) -> str | None:
     if status != 0:
         raise ctypes.WinError(status)
     return bytes(buffer)[:6].hex(":").upper() if size.value == 6 else None
+
+
+def resolve_netbios_name(ip: str, source: str) -> str | None:
+    """Ask one ARP-discovered neighbor for its NetBIOS computer name."""
+    query_id = randbits(16)
+    query = _NBNS_HEADER.pack(query_id, 0, 1, 0, 0, 0)
+    query += _NBNS_WILDCARD + pack("!HH", _NBSTAT, _IN)
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.settimeout(_NBNS_TIMEOUT)
+        sock.bind((source, 0))
+        sock.connect((ip, _NBNS_PORT))
+        sock.send(query)
+        return _netbios_computer_name(sock.recv(8192), query_id)
+
+
+def _netbios_computer_name(reply: bytes, query_id: int) -> str | None:
+    # RFC 1002 §4.2.18 gives one answer with the queried name and no questions.
+    record_offset = _NBNS_HEADER.size + len(_NBNS_WILDCARD)
+    data_offset = record_offset + _NBNS_RECORD.size
+    if len(reply) <= data_offset:
+        return None
+    reply_id, flags, questions, answers, _, _ = _NBNS_HEADER.unpack_from(reply)
+    # Check the response bit, opcode, truncation bit and response code.
+    if reply_id != query_id or flags & 0xFA0F != 0x8000 or (questions, answers) != (0, 1):
+        return None
+    if reply[_NBNS_HEADER.size : record_offset] != _NBNS_WILDCARD:
+        return None
+    kind, record_class, _, length = _NBNS_RECORD.unpack_from(reply, record_offset)
+    if (kind, record_class) != (_NBSTAT, _IN) or data_offset + length > len(reply):
+        return None
+    names_start = data_offset + 1
+    names_end = names_start + reply[data_offset] * _NBNS_NAME.size
+    if names_end > data_offset + length:
+        return None
+    for offset in range(names_start, names_end, _NBNS_NAME.size):
+        raw_name, suffix, name_flags = _NBNS_NAME.unpack_from(reply, offset)
+        # The unique active <00> entry is the workstation's computer name.
+        if suffix != 0 or name_flags & 0x9C00 != 0x0400:
+            continue
+        try:
+            name = raw_name.rstrip(b" \x00").decode("oem" if platform == "win32" else "ascii")
+        except UnicodeDecodeError:
+            continue
+        if name and name.isprintable():
+            return name
+    return None
 
 
 @cache

@@ -3,14 +3,14 @@
 import sys
 
 from PySide6.QtCore import QEvent, QLockFile, QObject, QPoint, Slot
-from PySide6.QtGui import QFont, QIcon
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 from nwake import __version__
 from nwake.dialogs import message
 from nwake.hosts import HostStore, StoreError, data_directory
 from nwake.monitor import Monitor
-from nwake.theme import STYLESHEET, app_icon
+from nwake.theme import STYLESHEET, NwakeStyle, app_icon, ui_font
 from nwake.window import DeviceWindow
 
 
@@ -95,10 +95,8 @@ def main() -> int:
     app.setApplicationName("Nwake")
     app.setApplicationVersion(__version__)
     app.setQuitOnLastWindowClosed(False)
-    font = QFont("Segoe UI", 10)
-    font.setFamilies(["Segoe UI", "Microsoft YaHei UI"])
-    app.setFont(font)
-    app.setStyle("Fusion")
+    app.setFont(ui_font())
+    app.setStyle(NwakeStyle())
     app.setStyleSheet(STYLESHEET)
     icon = app_icon()
     app.setWindowIcon(icon)

@@ -10,7 +10,7 @@ from PySide6.QtCore import SLOT, QObject, Qt, QThreadPool, Signal, Slot
 from PySide6.QtNetwork import QAbstractSocket, QHostInfo, QNetworkInterface
 
 from nwake.hosts import Host, HostError, normalize_mac
-from nwake.network import preferred_interface_index, resolve_mac
+from nwake.network import preferred_interface_index, resolve_mac, resolve_netbios_name
 
 _ARP_WORKERS = 32
 _NAME_WORKERS = 8
@@ -84,9 +84,11 @@ def local_networks() -> tuple[LanNetwork, ...]:
 class LanScanner(QObject):
     found = Signal(object)
     renamed = Signal(object)
+    name_unresolved = Signal(str)
     progress = Signal(int, int)
     finished = Signal(int, str)
     _reply = Signal(object)
+    _netbios_reply = Signal(object)
 
     def __init__(
         self,
@@ -94,14 +96,20 @@ class LanScanner(QObject):
         *,
         arp: Callable[[str, str], str | None] = resolve_mac,
         lookup: Callable[..., int] = QHostInfo.lookupHost,
+        netbios: Callable[[str, str], str | None] = resolve_netbios_name,
     ):
         super().__init__(parent)
         self._arp = arp
         self._lookup = lookup
+        self._netbios = netbios
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(_ARP_WORKERS)
+        self._netbios_pool = QThreadPool(self)
+        self._netbios_pool.setMaxThreadCount(_NAME_WORKERS)
         self._reply.connect(self._record, Qt.ConnectionType.QueuedConnection)
+        self._netbios_reply.connect(self._record_netbios, Qt.ConnectionType.QueuedConnection)
         self._revision = 0
+        self._source = ""
         self._completed = 0
         self._total = 0
         self._failed = 0
@@ -109,10 +117,13 @@ class LanScanner(QObject):
         self._macs: set[str] = set()
         self._names: deque[Host] = deque()
         self._lookups: dict[int, Host] = {}
+        self._netbios_pending = 0
 
     @property
     def scanning(self) -> bool:
-        return self._completed < self._total
+        return self._completed < self._total or bool(
+            self._names or self._lookups or self._netbios_pending
+        )
 
     def start(self, network: LanNetwork, existing: tuple[Host, ...]) -> None:
         self.cancel()
@@ -121,14 +132,14 @@ class LanScanner(QObject):
         self._completed = self._failed = 0
         self._error = ""
         self._total = len(targets)
+        self._source = str(network.source.ip)
         self.progress.emit(0, self._total)
         if not targets:
             self.finished.emit(0, "")
             return
-        source = str(network.source.ip)
         prefix = network.source.network.prefixlen
         for target in targets:
-            self._pool.start(partial(self._probe, self._revision, target, source, prefix))
+            self._pool.start(partial(self._probe, self._revision, target, self._source, prefix))
 
     def _probe(self, revision: int, ip: str, source: str, prefix: int) -> None:
         host = None
@@ -157,8 +168,7 @@ class LanScanner(QObject):
             self._names.append(host)
             self._start_names()
         self.progress.emit(self._completed, self._total)
-        if not self.scanning:
-            self.finished.emit(self._failed, self._error)
+        self._finish_if_idle()
 
     def _start_names(self) -> None:
         while self._names and len(self._lookups) < _NAME_WORKERS:
@@ -166,27 +176,65 @@ class LanScanner(QObject):
             lookup_id = self._lookup(host.ip, self, SLOT("_record_name(QHostInfo)"))
             if lookup_id >= 0:
                 self._lookups[lookup_id] = host
+            else:
+                self._start_netbios(host)
 
     @Slot(QHostInfo)
     def _record_name(self, info: QHostInfo) -> None:
         host = self._lookups.pop(info.lookupId(), None)
         if host is None:
             return
-        if info.error() == QHostInfo.HostInfoError.NoError:
-            name = info.hostName().rstrip(".")
-            if name and name != host.ip:
-                try:
-                    renamed = replace(host, name=name)
-                except HostError:
-                    pass
-                else:
-                    self.renamed.emit(renamed)
+        name = (
+            info.hostName().rstrip(".") if info.error() == QHostInfo.HostInfoError.NoError else ""
+        )
+        if not self._apply_name(host, name):
+            self._start_netbios(host)
         self._start_names()
+        self._finish_if_idle()
+
+    def _start_netbios(self, host: Host) -> None:
+        self._netbios_pending += 1
+        self._netbios_pool.start(partial(self._query_netbios, self._revision, host, self._source))
+
+    def _query_netbios(self, revision: int, host: Host, source: str) -> None:
+        try:
+            name = self._netbios(host.ip, source)
+        except OSError:
+            name = None  # A missing name doesn't invalidate an ARP result.
+        self._netbios_reply.emit((revision, host, name))
+
+    @Slot(object)
+    def _record_netbios(self, result: tuple[int, Host, str | None]) -> None:
+        revision, host, name = result
+        if revision != self._revision:
+            return
+        self._netbios_pending -= 1
+        if not self._apply_name(host, name):
+            self.name_unresolved.emit(host.ip)
+        self._finish_if_idle()
+
+    def _apply_name(self, host: Host, name: str | None) -> bool:
+        if not name:
+            return False
+        try:
+            renamed = replace(host, name=name)
+        except HostError:
+            return False
+        if renamed.name == host.ip:
+            return False
+        self.renamed.emit(renamed)
+        return True
+
+    def _finish_if_idle(self) -> None:
+        if not self.scanning:
+            self.finished.emit(self._failed, self._error)
 
     def cancel(self) -> None:
         self._revision += 1
         self._total = self._completed = 0
         self._pool.clear()
+        self._netbios_pool.clear()
+        self._netbios_pending = 0
         lookup_ids = tuple(self._lookups)
         self._lookups.clear()
         self._names.clear()
@@ -196,3 +244,4 @@ class LanScanner(QObject):
     def stop(self) -> None:
         self.cancel()
         self._pool.waitForDone()
+        self._netbios_pool.waitForDone()

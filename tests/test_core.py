@@ -13,7 +13,14 @@ from unittest.mock import patch
 
 from nwake.discovery import LanNetwork
 from nwake.hosts import Host, HostError, HostStore, StoreError, data_directory
-from nwake.network import Reachability, _interpret_echo, probe_ipv4, resolve_mac, send_wake
+from nwake.network import (
+    Reachability,
+    _interpret_echo,
+    probe_ipv4,
+    resolve_mac,
+    resolve_netbios_name,
+    send_wake,
+)
 
 
 class InventoryTest(unittest.TestCase):
@@ -105,6 +112,41 @@ class NetworkTest(unittest.TestCase):
             self.assertEqual(resolve_mac("192.0.2.6", "192.0.2.5"), "02:12:34:56:78:9A")
         with patch("nwake.network._arp_api", return_value=SimpleNamespace(SendARP=lambda *_: 67)):
             self.assertIsNone(resolve_mac("192.0.2.6", "192.0.2.5"))
+
+    def test_netbios_selects_the_workstation_name_from_a_valid_reply(self):
+        query_id = 0x1234
+        wildcard = b"\x20CKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\x00"
+        entries = b"".join(
+            pack("!15sBH", name.ljust(15), suffix, flags)
+            for name, suffix, flags in (
+                (b"WORKGROUP", 0, 0x8400),
+                (b"FILE-SERVICE", 0x20, 0x0400),
+                (b"CONFLICTING", 0, 0x0C00),
+                (b"DESKTOP-01", 0, 0x4400),
+            )
+        )
+        data = b"\x04" + entries + bytes(46)
+        response = (
+            pack("!6H", query_id, 0x8400, 0, 1, 0, 0)
+            + wildcard
+            + pack("!HHIH", 0x21, 1, 0, len(data))
+            + data
+        )
+        with (
+            patch("nwake.network.randbits", return_value=query_id),
+            patch("nwake.network.socket.socket") as factory,
+        ):
+            sock = factory.return_value.__enter__.return_value
+            sock.recv.return_value = response
+            self.assertEqual(resolve_netbios_name("192.0.2.6", "192.0.2.5"), "DESKTOP-01")
+            sock.bind.assert_called_once_with(("192.0.2.5", 0))
+            sock.connect.assert_called_once_with(("192.0.2.6", 137))
+            sock.send.assert_called_once_with(
+                pack("!6H", query_id, 0, 1, 0, 0, 0) + wildcard + b"\x00\x21\x00\x01"
+            )
+            for invalid in (response[:-1], b"\x00\x00" + response[2:]):
+                sock.recv.return_value = invalid
+                self.assertIsNone(resolve_netbios_name("192.0.2.6", "192.0.2.5"))
 
     def test_wake_wire_format_and_target(self):
         for prefix, broadcast in ((None, "255.255.255.255"), (25, "192.168.1.127")):
