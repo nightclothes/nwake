@@ -2,7 +2,7 @@
 
 import sys
 
-from PySide6.QtCore import QEvent, QLockFile, QObject, QPoint, Slot
+from PySide6.QtCore import QEvent, QLockFile, QObject, QPoint, QTimer, Slot
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
@@ -17,6 +17,7 @@ from nwake.window import DeviceWindow
 class Tray(QObject):
     def __init__(self, app: QApplication, window: DeviceWindow, icon: QIcon):
         super().__init__(window)
+        self._quitting = False
         self.icon = QSystemTrayIcon(icon, self)
         self.menu = QMenu(window)
         open_action = self.menu.addAction("打开电脑列表")
@@ -70,12 +71,23 @@ class Tray(QObject):
             self.window.show()
         self.window.raise_()
         self.window.activateWindow()
-        self.window.monitor.refresh()
 
     @Slot()
     def quit(self) -> None:
-        if QApplication.activeModalWidget() is not None:
+        if self._quitting:
+            return
+        self._quitting = True
+        self._continue_quit()
+
+    def _continue_quit(self) -> None:
+        modal = QApplication.activeModalWidget()
+        if modal is not None:
             self.open_window()
+            if modal.close():
+                # Let the closed dialog's event loop unwind before closing its parent.
+                QTimer.singleShot(0, self, self._continue_quit)
+            else:
+                self._quitting = False
             return
         self.window.exiting = True
         QApplication.quit()
@@ -135,7 +147,6 @@ def main() -> int:
                 work_area.right() - window.width() - 18, work_area.bottom() - window.height() - 35
             )
         )
-        monitor.start()
         tray.open_window()
         return app.exec()
     finally:

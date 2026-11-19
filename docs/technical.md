@@ -6,8 +6,8 @@
 | --- | --- |
 | Magic Packet | 6 个 `FF` 字节，紧接目标 MAC 的 16 次重复，总长 102 字节。每次操作向每个勾选目标发送一个 UDP 数据报，端口 9。见 [AMD Magic Packet 说明](https://docs.amd.com/r/en-US/ug1085-zynq-ultrascale-trm/Wake-up-on-Ethernet?contentId=woF07HyXSCMOBeQVhKlEzA)。 |
 | 广播目标 | 默认 `255.255.255.255`。提供子网前缀后，用目标 IPv4 和前缀计算该子网的广播地址，例如 `192.168.1.20/25` 对应 `192.168.1.127`。前缀以目标实际网络为准。 |
-| 状态探测 | 每约 5 秒调用一次 [Windows `IcmpSendEcho`](https://learn.microsoft.com/zh-cn/windows/win32/api/icmpapi/nf-icmpapi-icmpsendecho)，单主机超时 750 ms。同一轮未结束时不会叠加探测。只有来自目标 IPv4 且返回成功的回复才算在线。 |
-| 发包反馈 | 「已发送」表示本机系统接受了数据报；UDP 没有目标端确认。对尚无在线回复的电脑显示最多约 45 秒的「等待上线」，回复成功后切换为「在线」。 |
+| 状态探测 | 点击「刷新」后，对列表中的设备调用 [Windows `IcmpSendEcho`](https://learn.microsoft.com/zh-cn/windows/win32/api/icmpapi/nf-icmpapi-icmpsendecho)。单主机超时 750 ms，每次只运行一轮探测。只有来自目标 IPv4 且返回成功的回复才算在线。 |
+| 发包反馈 | 「已发送」表示本机系统接受了数据报。目标显示「等待上线」，发送后可点击「刷新」，状态随探测结果更新。 |
 
 状态包括「待检测」「在线」「无响应」「等待上线」「检测异常」。使用 DHCP 时，建议在路由器上为目标网卡保留 IPv4，避免 IP 换给另一台机器后误判状态。
 

@@ -1,7 +1,7 @@
 """Row layout and keyboard selection shared by the two device lists."""
 
-from PySide6.QtCore import QModelIndex, QRectF, Qt
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QKeyEvent, QPainter
+from PySide6.QtCore import QAbstractItemModel, QEvent, QModelIndex, QRectF, Qt
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QKeyEvent, QMouseEvent, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHeaderView,
@@ -12,6 +12,32 @@ from PySide6.QtWidgets import (
 )
 
 from nwake.theme import STATUS
+
+
+class _CheckCellDelegate(QStyledItemDelegate):
+    def editorEvent(
+        self,
+        event: QEvent,
+        model: QAbstractItemModel,
+        option: QStyleOptionViewItem,
+        index: QModelIndex,
+    ) -> bool:
+        checkable = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable
+        if (
+            isinstance(event, QMouseEvent)
+            and event.type() == QEvent.Type.MouseButtonRelease
+            and event.button() == Qt.MouseButton.LeftButton
+            and option.rect.contains(event.position().toPoint())
+            and index.flags() & checkable == checkable
+        ):
+            role = Qt.ItemDataRole.CheckStateRole
+            value = index.data(role)
+            if value is None:
+                return False
+            checked = Qt.CheckState(value) == Qt.CheckState.Checked
+            state = Qt.CheckState.Unchecked if checked else Qt.CheckState.Checked
+            return model.setData(index, state.value, role)
+        return super().editorEvent(event, model, option, index)
 
 
 class DeviceTable(QTableWidget):
@@ -41,6 +67,7 @@ class DeviceTable(QTableWidget):
         self.setTabKeyNavigation(False)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.setItemDelegateForColumn(0, _CheckCellDelegate(self))
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
         check = self.item(self.currentRow(), 0)

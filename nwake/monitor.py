@@ -3,15 +3,11 @@
 from collections.abc import Callable
 from datetime import datetime
 from threading import Event
-from time import monotonic
 
-from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, QTimer, Signal, Slot
+from PySide6.QtCore import QObject, QRunnable, Qt, QThreadPool, Signal, Slot
 
 from nwake.hosts import Host
 from nwake.network import ProbeResult, Reachability, probe_ipv4, send_wake
-
-REFRESH_MS = 5_000
-WAIT_SECONDS = 45
 
 
 class _Task(QRunnable):
@@ -41,7 +37,7 @@ class Monitor(QObject):
         self._probe = probe
         self._wake = wake
         self._probes: dict[Host, ProbeResult] = {}
-        self._waiting: dict[Host, float] = {}
+        self._waiting: set[Host] = set()
         self._revision = 0
         self._remaining = 0
         self.sending = False
@@ -54,16 +50,10 @@ class Monitor(QObject):
         self._wake_pool.setMaxThreadCount(1)
         self._probe_done.connect(self._record_probe, Qt.ConnectionType.QueuedConnection)
         self._wake_done.connect(self._record_wake, Qt.ConnectionType.QueuedConnection)
-        self._timer = QTimer(self, interval=REFRESH_MS)
-        self._timer.timeout.connect(self.refresh)
 
     @property
     def scanning(self) -> bool:
         return self._remaining > 0
-
-    def start(self) -> None:
-        self._timer.start()
-        self.refresh()
 
     def set_hosts(self, hosts: tuple[Host, ...]) -> None:
         if hosts == self.hosts:
@@ -71,24 +61,24 @@ class Monitor(QObject):
         self.hosts = hosts
         self._revision += 1
         self._probes = {host: self._probes[host] for host in hosts if host in self._probes}
-        self._waiting = {host: self._waiting[host] for host in hosts if host in self._waiting}
-        self.refresh()
+        self._waiting.intersection_update(hosts)
         self.changed.emit()
 
     def readout(self, host: Host) -> tuple[str, str]:
+        if host in self._waiting:
+            return "waiting", "点击「刷新」确认是否已上线。"
         probe = self._probes.get(host)
         if probe and probe.state is Reachability.ONLINE:
             return "online", ""
         if probe and probe.state is Reachability.ERROR:
             return "error", probe.detail
-        if self._waiting.get(host, 0) > monotonic():
-            return "waiting", ""
         return ("quiet" if probe else "checking"), ""
 
     @Slot()
     def refresh(self) -> None:
         if self._stopping.is_set() or self.scanning or not self.hosts:
             return
+        self._waiting.clear()
         self._remaining = len(self.hosts)
         revision = self._revision
         for host in self.hosts:
@@ -109,14 +99,15 @@ class Monitor(QObject):
             return
         revision, host, result = item
         self._remaining -= 1
-        if revision == self._revision:
-            self._probes[host] = result
-            if result.state is Reachability.ONLINE:
-                self._waiting.pop(host, None)
+        if revision != self._revision:
             if not self.scanning:
-                self.last_scan = datetime.now()
-        elif not self.scanning:
-            self.refresh()
+                self.changed.emit()
+            return
+        # A wake sent after this refresh started needs a fresh check.
+        if host not in self._waiting:
+            self._probes[host] = result
+        if not self.scanning:
+            self.last_scan = datetime.now()
         self.changed.emit()
 
     def wake(self, hosts: tuple[Host, ...]) -> None:
@@ -126,34 +117,33 @@ class Monitor(QObject):
         self._wake_pool.start(_Task(lambda: self._send_batch(hosts), self._wake_done))
         self.changed.emit()
 
-    def _send_batch(self, hosts: tuple[Host, ...]) -> list[tuple[Host, str, float]]:
+    def _send_batch(self, hosts: tuple[Host, ...]) -> list[tuple[Host, str]]:
         outcome = []
         for host in hosts:
             if self._stopping.is_set():
                 break
             try:
                 self._wake(host)
-                outcome.append((host, "", monotonic() + WAIT_SECONDS))
+                outcome.append((host, ""))
             except OSError as error:
-                outcome.append((host, str(error) or "系统未接受唤醒包。", 0))
+                outcome.append((host, str(error) or "系统未接受唤醒包。"))
         return outcome
 
     @Slot(object)
-    def _record_wake(self, outcome: list[tuple[Host, str, float]]) -> None:
+    def _record_wake(self, outcome: list[tuple[Host, str]]) -> None:
         if self._stopping.is_set():
             return
         self.sending = False
-        for host, error, until in outcome:
+        for host, error in outcome:
             if host in self.hosts and not error:
-                self._waiting[host] = until
+                self._probes.pop(host, None)
+                self._waiting.add(host)
         self.wake_finished.emit(outcome)
-        self.refresh()
         self.changed.emit()
 
     @Slot()
     def stop(self) -> None:
         self._stopping.set()
-        self._timer.stop()
         self._scan_pool.clear()
         self._wake_pool.clear()
         self._scan_pool.waitForDone()

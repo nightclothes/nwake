@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from html import escape
+from ipaddress import IPv4Interface
 
 from PySide6.QtCore import QPointF, QSignalBlocker, Qt, Slot
 from PySide6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPaintEvent, QPen
@@ -62,6 +63,8 @@ class DiscoveryDialog(QDialog):
         self._capacity = MAX_HOSTS - len(existing)
         self._rows: dict[str, int] = {}
         self._pending_names: set[str] = set()
+        self._active_network: tuple[str, IPv4Interface] | None = None
+        self._rescan_checked: set[tuple[str, str]] = set()
         self._total = 0
         self._named = 0
         self._save_failed = False
@@ -165,8 +168,12 @@ class DiscoveryDialog(QDialog):
         self.finished.connect(scanner.cancel)
         self._reload_networks()
 
+    @staticmethod
+    def _network_key(network: LanNetwork | None) -> tuple[str, IPv4Interface] | None:
+        return (network.name, network.source) if network is not None else None
+
     def _reload_networks(self) -> None:
-        current = self.network.currentData()
+        current = self._network_key(self.network.currentData())
         networks = local_networks()
         with QSignalBlocker(self.network):
             self.network.clear()
@@ -175,7 +182,7 @@ class DiscoveryDialog(QDialog):
                 caption = f"{network.scope} · {network.name}"
                 self.network.addItem(caption, network)
                 self.network.setItemData(index, escape(caption), Qt.ItemDataRole.ToolTipRole)
-                if network == current:
+                if self._network_key(network) == current:
                     preferred = index
             if networks:
                 self.network.setCurrentIndex(preferred)
@@ -184,6 +191,13 @@ class DiscoveryDialog(QDialog):
 
     @Slot()
     def _begin(self) -> None:
+        network: LanNetwork | None = self.network.currentData()
+        network_key = self._network_key(network)
+        if network_key is not None and network_key == self._active_network:
+            self._rescan_checked.update((host.ip, host.mac) for host in self._selected())
+        else:
+            self._rescan_checked.clear()
+        self._active_network = network_key
         self._rows.clear()
         self._pending_names.clear()
         self.results.setRowCount(0)
@@ -193,7 +207,6 @@ class DiscoveryDialog(QDialog):
         self.status.setToolTip("")
         self._sync_names()
         self._sync_selection()
-        network: LanNetwork | None = self.network.currentData()
         self.network.setToolTip(escape(self.network.currentText()))
         if network is None:
             self._scanner.cancel()
@@ -233,6 +246,7 @@ class DiscoveryDialog(QDialog):
 
     @Slot(int, str)
     def _finished(self, failed: int, detail: str) -> None:
+        self._rescan_checked.clear()
         self.scan_button.setText("重新扫描")
         if self._save_failed:
             return
@@ -264,6 +278,9 @@ class DiscoveryDialog(QDialog):
         row = self.results.rowCount()
         self._rows[host.ip] = row
         self._pending_names.add(host.ip)
+        identity = (host.ip, host.mac)
+        checked = _CHECKED if identity in self._rescan_checked else _UNCHECKED
+        self._rescan_checked.discard(identity)
         flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
         with QSignalBlocker(self.results):
             self.results.insertRow(row)
@@ -272,7 +289,7 @@ class DiscoveryDialog(QDialog):
                 item.setFlags(flags)
                 if column == 0:
                     item.setFlags(flags | Qt.ItemFlag.ItemIsUserCheckable)
-                    item.setCheckState(_UNCHECKED)
+                    item.setCheckState(checked)
                     item.setData(_HOST, host)
                     item.setData(Qt.ItemDataRole.AccessibleTextRole, f"勾选 {host.ip}")
                 elif column == 1:
@@ -300,16 +317,21 @@ class DiscoveryDialog(QDialog):
                 name.setFont(ui_font(10, QFont.Weight.DemiBold))
                 name.setToolTip(escape(host.name))
             self._sync_names()
+            if check.checkState() == _CHECKED:
+                self._sync_selection()
 
     @Slot(str)
     def _name_unresolved(self, ip: str) -> None:
         if ip not in self._pending_names:
             return
         self._pending_names.remove(ip)
+        row = self._rows[ip]
         with QSignalBlocker(self.results):
-            name = self.results.item(self._rows[ip], 1)
+            name = self.results.item(row, 1)
             name.setText("未识别")
             name.setToolTip("添加后可在电脑列表中编辑主机名。")
+        if self.results.item(row, 0).checkState() == _CHECKED:
+            self._sync_selection()
 
     def _sync_names(self) -> None:
         total = self.results.rowCount()
@@ -322,6 +344,7 @@ class DiscoveryDialog(QDialog):
                 name.setText("—")
                 name.setToolTip("主机名查询已停止。")
         self._pending_names.clear()
+        self._sync_selection()
 
     def _selected(self) -> tuple[Host, ...]:
         return tuple(
@@ -333,19 +356,32 @@ class DiscoveryDialog(QDialog):
     @Slot()
     def _sync_selection(self) -> None:
         total = self.results.rowCount()
-        count = len(self._selected())
+        selected = self._selected()
+        count = len(selected)
+        waiting = any(host.ip in self._pending_names for host in selected)
+        over_capacity = count > self._capacity
         with QSignalBlocker(self.select_all):
             self.select_all.setCheckState(
                 _UNCHECKED if not count else _CHECKED if count == total else _PARTIAL
             )
         self.select_all.setEnabled(bool(total))
-        self.add_button.setEnabled(0 < count <= self._capacity)
-        suffix = f" · 可添加 {self._capacity} 台" if count > self._capacity else ""
+        self.add_button.setEnabled(bool(count) and not over_capacity and not waiting)
+        hint = ""
+        suffix = ""
+        if over_capacity:
+            suffix = f" · 可添加 {self._capacity} 台"
+        elif waiting:
+            suffix = " · 等待主机名"
+            hint = "等待勾选设备的主机名，或点击「停止」后按 IP 添加。"
         self.selection.setText(f"已勾选 {count} 台{suffix}")
-        set_label_tone(self.selection, "error" if suffix else "info")
+        self.selection.setToolTip(hint)
+        self.add_button.setToolTip(hint)
+        set_label_tone(self.selection, "error" if over_capacity else "info")
 
     @Slot(Qt.CheckState)
     def _select_all(self, state: Qt.CheckState) -> None:
+        if state == _UNCHECKED:
+            self._rescan_checked.clear()
         with QSignalBlocker(self.results):
             for row in range(self.results.rowCount()):
                 self.results.item(row, 0).setCheckState(state)
@@ -354,7 +390,9 @@ class DiscoveryDialog(QDialog):
     @Slot()
     def _add_selected(self) -> None:
         selected = self._selected()
-        if not 0 < len(selected) <= self._capacity:
+        if not 0 < len(selected) <= self._capacity or any(
+            host.ip in self._pending_names for host in selected
+        ):
             return
         try:
             self._save(selected)

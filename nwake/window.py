@@ -127,10 +127,10 @@ class DeviceWindow(QMainWindow):
         self.pages.addWidget(self.empty)
 
         self.table = DeviceTable("电脑列表", "状态", 113)
-        self.table.setAccessibleDescription("勾选复选框可唤醒一台或多台电脑。选中行可编辑或移除。")
+        self.table.setAccessibleDescription("勾选复选框可唤醒或移除电脑。编辑作用于高亮行。")
         self.table.setItemDelegateForColumn(3, StatusPill(self.table))
         self.table.itemChanged.connect(self._item_changed)
-        self.table.currentCellChanged.connect(self._sync_actions)
+        self.table.itemSelectionChanged.connect(self._sync_actions)
         self.table.cellDoubleClicked.connect(self._open_row)
         self.pages.addWidget(self.table)
         workspace.addWidget(self.pages, 1)
@@ -148,8 +148,9 @@ class DeviceWindow(QMainWindow):
         self.edit_button = button("编辑", "quiet")
         self.edit_button.clicked.connect(self._edit_active)
         row_actions.addWidget(self.edit_button)
-        self.remove_button = button("移除", "quiet")
-        self.remove_button.clicked.connect(self._remove_active)
+        self.remove_button = button("移除所选", "quiet")
+        self.remove_button.setMinimumWidth(self.remove_button.sizeHint().width())
+        self.remove_button.clicked.connect(self._remove_hosts)
         row_actions.addWidget(self.remove_button)
         workspace.addWidget(self.row_actions)
 
@@ -201,10 +202,8 @@ class DeviceWindow(QMainWindow):
                 self.exit_requested.emit()
 
     def _active(self) -> Host | None:
-        index = self.table.currentRow()
-        if 0 <= index < len(self._shown_hosts) and self.table.selectedItems():
-            return self._shown_hosts[index]
-        return None
+        rows = self.table.selectionModel().selectedRows()
+        return self._shown_hosts[rows[0].row()] if rows else None
 
     def _selected(self) -> tuple[Host, ...]:
         return tuple(
@@ -267,7 +266,7 @@ class DeviceWindow(QMainWindow):
         elif self._shown_hosts and last_scan is not None:
             self.freshness.setText(f"最近检测 {last_scan:%H:%M:%S}")
         elif self._shown_hosts:
-            self.freshness.setText("等待首次检测")
+            self.freshness.setText("点击「刷新」检测在线状态")
         else:
             self.freshness.clear()
         self._sync_actions()
@@ -290,8 +289,11 @@ class DeviceWindow(QMainWindow):
         self.add_button.setToolTip("最多管理 64 台电脑。" if total == MAX_HOSTS else "")
         self.scan_button.setEnabled(self.add_button.isEnabled())
         self.scan_button.setToolTip(self.add_button.toolTip())
-        self.edit_button.setEnabled(editable and self._active() is not None)
-        self.remove_button.setEnabled(self.edit_button.isEnabled())
+        has_active_row = self._active() is not None
+        self.edit_button.setEnabled(editable and has_active_row)
+        self.remove_button.setEnabled(editable and (count > 0 or has_active_row))
+        self.remove_button.setText("移除所选" if count else "移除")
+        self.remove_button.setToolTip("从列表移除勾选的电脑" if count else "从列表移除当前行")
         self.refresh_button.setEnabled(bool(total) and not self.monitor.scanning)
         self.wake_button.setEnabled(bool(count) and not self.monitor.sending)
         self.wake_button.setText("正在发送…" if self.monitor.sending else "唤醒所选")
@@ -353,23 +355,36 @@ class DeviceWindow(QMainWindow):
         dialog.deleteLater()
 
     @Slot()
-    def _remove_active(self) -> None:
-        host = self._active()
-        if not host or not message(
-            self,
-            "移除电脑",
-            f"从列表移除「{host.name}」？这不会改变该电脑的电源状态。",
-            action="移除电脑",
-            danger=True,
-        ):
+    def _remove_hosts(self) -> None:
+        hosts = self._selected()
+        if not hosts:
+            active = self._active()
+            if active is None:
+                return
+            hosts = (active,)
+
+        count = len(hosts)
+        title = action = "移除电脑"
+        prompt = f"从电脑列表移除「{hosts[0].name}」？"
+        detail = ""
+        if count > 1:
+            title = "批量移除电脑"
+            prompt = f"从电脑列表移除这 {count} 台设备？"
+            action = f"移除 {count} 台"
+            detail = "\n".join(
+                host.ip if host.name == host.ip else f"{host.name} · {host.ip}" for host in hosts
+            )
+        if not message(self, title, prompt, detail=detail, action=action, danger=True):
             return
-        new = tuple(existing for existing in self.monitor.hosts if existing != host)
+
+        targets = set(hosts)
+        new = tuple(host for host in self.monitor.hosts if host not in targets)
         try:
             self._save_inventory(new)
         except StoreError as error:
             self._notice("移除失败，请检查写入权限。", "error", str(error))
         else:
-            self._notice("已移除电脑。", "success")
+            self._notice(f"已移除 {count} 台电脑。", "success")
             if new:
                 self.table.setFocus()
             else:
@@ -395,8 +410,8 @@ class DeviceWindow(QMainWindow):
         self.monitor.wake(hosts)
 
     @Slot(object)
-    def _wake_finished(self, outcome: list[tuple[Host, str, float]]) -> None:
-        failures = [(host, error) for host, error, _ in outcome if error]
+    def _wake_finished(self, outcome: list[tuple[Host, str]]) -> None:
+        failures = [(host, error) for host, error in outcome if error]
         successes = len(outcome) - len(failures)
         if failures:
             detail = "\n".join(f"{host.name} ({host.ip})：{error}" for host, error in failures)
